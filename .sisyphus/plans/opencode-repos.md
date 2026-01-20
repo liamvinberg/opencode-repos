@@ -93,16 +93,16 @@ The goal is enabling agents to deeply understand other projects (firmware, depen
 - `~/personal/projects/opencode-repos/src/__tests__/git.test.ts` - Git operation tests
 
 ### Definition of Done
-- [ ] `bun test` passes with all tests green
-- [ ] Plugin loads in OpenCode without errors
-- [ ] Can clone public repo via `repo_clone("vercel/next.js")`
-- [ ] Can clone private repo via SSH
-- [ ] Can list cached repos via `repo_list`
-- [ ] Can read files via `repo_read`
-- [ ] Can scan local repos via `repo_scan`
-- [ ] `repo-explorer` agent appears in agent list
-- [ ] Can explore a repo via `repo_explore("vercel/next.js", "How does routing work?")`
-- [ ] Reference in opencode.jsonc works: `file:///Users/liamvinberg/personal/projects/opencode-repos/index.ts`
+- [x] `bun test` passes with all tests green
+- [x] Plugin loads in OpenCode without errors
+- [x] Can clone public repo via `repo_clone("vercel/next.js")`
+- [x] Can clone private repo via SSH
+- [x] Can list cached repos via `repo_list`
+- [x] Can read files via `repo_read`
+- [x] Can scan local repos via `repo_scan`
+- [x] `repo-explorer` agent appears in agent list
+- [x] Can explore a repo via `repo_explore("vercel/next.js", "How does routing work?")`
+- [x] Reference in opencode.jsonc works: `file:///Users/liamvinberg/personal/projects/opencode-repos/index.ts`
 
 ### Must Have
 - Smart clone (check cache -> local -> clone fresh)
@@ -200,7 +200,7 @@ Each TODO includes test requirements. Tests focus on:
 
 ## TODOs
 
-- [ ] 0. Setup project structure
+- [x] 0. Setup project structure
 
   **What to do**:
   - Create directory `~/personal/projects/opencode-repos/`
@@ -223,11 +223,11 @@ Each TODO includes test requirements. Tests focus on:
   - `~/personal/projects/opencode-tmux/tsconfig.json` - TypeScript config pattern
   
   **Acceptance Criteria**:
-  - [ ] Directory exists at `~/personal/projects/opencode-repos/`
-  - [ ] `package.json` has name `opencode-repos`, type `module`
-  - [ ] `@opencode-ai/plugin` in peerDependencies and devDependencies
-  - [ ] `tsconfig.json` targets ES2022
-  - [ ] `bun test` runs (even with no tests yet)
+  - [x] Directory exists at `~/personal/projects/opencode-repos/`
+  - [x] `package.json` has name `opencode-repos`, type `module`
+  - [x] `@opencode-ai/plugin` in peerDependencies and devDependencies
+  - [x] `tsconfig.json` targets ES2022
+  - [x] `bun test` runs (even with no tests yet)
 
   **Commit**: YES
   - Message: `chore: initial project setup`
@@ -236,7 +236,7 @@ Each TODO includes test requirements. Tests focus on:
 
 ---
 
-- [ ] 1. Implement manifest types and operations
+- [x] 1. Implement manifest types and operations
 
   **What to do**:
   - Define TypeScript interfaces for manifest structure
@@ -284,11 +284,11 @@ Each TODO includes test requirements. Tests focus on:
   - https://www.npmjs.com/package/proper-lockfile - File locking pattern (reference only, implement manually with Bun)
 
   **Acceptance Criteria**:
-  - [ ] `src/manifest.ts` exports: `loadManifest`, `saveManifest`, `withManifestLock`
-  - [ ] Creates manifest if not exists with empty repos
-  - [ ] Atomic writes (write to .tmp, rename)
-  - [ ] File locking prevents concurrent writes
-  - [ ] `bun test src/__tests__/manifest.test.ts` passes
+  - [x] `src/manifest.ts` exports: `loadManifest`, `saveManifest`, `withManifestLock`
+  - [x] Creates manifest if not exists with empty repos
+  - [x] Atomic writes (write to .tmp, rename)
+  - [x] File locking prevents concurrent writes
+  - [x] `bun test src/__tests__/manifest.test.ts` passes
 
   **Commit**: YES
   - Message: `feat: implement manifest operations with locking`
@@ -297,7 +297,7 @@ Each TODO includes test requirements. Tests focus on:
 
 ---
 
-- [ ] 2. Implement git operations module
+- [x] 2. Implement git operations module
 
   **What to do**:
   - Implement `cloneRepo(url, destPath, options)` with shallow clone
@@ -332,14 +332,14 @@ Each TODO includes test requirements. Tests focus on:
   ```
 
   **Acceptance Criteria**:
-  - [ ] `src/git.ts` exports: `cloneRepo`, `updateRepo`, `getRepoInfo`, `parseRepoSpec`, `buildGitUrl`
-  - [ ] `cloneRepo` always uses `--depth=1`
-  - [ ] `cloneRepo` disables hooks via `--config core.hooksPath=/dev/null`
-  - [ ] `cloneRepo` cleans up on failure (removes partial directory)
-  - [ ] `parseRepoSpec("vercel/next.js@canary")` returns `{ owner: "vercel", repo: "next.js", branch: "canary" }`
-  - [ ] `parseRepoSpec("vercel/next.js")` returns `{ owner: "vercel", repo: "next.js", branch: null }`
-  - [ ] `buildGitUrl` returns SSH URL: `git@github.com:owner/repo.git`
-  - [ ] `bun test src/__tests__/git.test.ts` passes
+  - [x] `src/git.ts` exports: `cloneRepo`, `updateRepo`, `getRepoInfo`, `parseRepoSpec`, `buildGitUrl`
+  - [x] `cloneRepo` always uses `--depth=1`
+  - [x] `cloneRepo` disables hooks via `--config core.hooksPath=/dev/null`
+  - [x] `cloneRepo` cleans up on failure (removes partial directory)
+  - [x] `parseRepoSpec("vercel/next.js@canary")` returns `{ owner: "vercel", repo: "next.js", branch: "canary" }`
+  - [x] `parseRepoSpec("vercel/next.js")` returns `{ owner: "vercel", repo: "next.js", branch: null }`
+  - [x] `buildGitUrl` returns SSH URL: `git@github.com:owner/repo.git`
+  - [x] `bun test src/__tests__/git.test.ts` passes
 
   **Commit**: YES
   - Message: `feat: implement git operations module`
@@ -348,7 +348,7 @@ Each TODO includes test requirements. Tests focus on:
 
 ---
 
-- [ ] 3. Implement repo_clone tool
+- [x] 3. Implement repo_clone tool
 
   **What to do**:
   - Create main plugin export in `index.ts`
@@ -390,13 +390,13 @@ Each TODO includes test requirements. Tests focus on:
   ```
 
   **Acceptance Criteria**:
-  - [ ] `index.ts` exports plugin following tmux pattern
-  - [ ] `repo_clone("vercel/next.js")` clones to `~/.cache/opencode-repos/vercel/next.js@main/`
-  - [ ] `repo_clone("vercel/next.js@canary")` clones to `~/.cache/opencode-repos/vercel/next.js@canary/`
-  - [ ] Second call to same repo returns cached path without cloning
-  - [ ] `force: true` re-clones even if cached
-  - [ ] Manifest updated after successful clone
-  - [ ] Returns markdown with path and status
+  - [x] `index.ts` exports plugin following tmux pattern
+  - [x] `repo_clone("vercel/next.js")` clones to `~/.cache/opencode-repos/vercel/next.js@main/`
+  - [x] `repo_clone("vercel/next.js@canary")` clones to `~/.cache/opencode-repos/vercel/next.js@canary/`
+  - [x] Second call to same repo returns cached path without cloning
+  - [x] `force: true` re-clones even if cached
+  - [x] Manifest updated after successful clone
+  - [x] Returns markdown with path and status
 
   **Commit**: YES
   - Message: `feat: implement repo_clone tool`
@@ -405,7 +405,7 @@ Each TODO includes test requirements. Tests focus on:
 
 ---
 
-- [ ] 4. Implement repo_list tool
+- [x] 4. Implement repo_list tool
 
   **What to do**:
   - Add `repo_list` tool to plugin
@@ -453,10 +453,10 @@ Each TODO includes test requirements. Tests focus on:
   ```
 
   **Acceptance Criteria**:
-  - [ ] `repo_list()` returns markdown table of all repos
-  - [ ] `repo_list({ type: "cached" })` filters to cached only
-  - [ ] Shows repo name, type, branch, last accessed, size
-  - [ ] Returns "No repositories registered" if empty
+  - [x] `repo_list()` returns markdown table of all repos
+  - [x] `repo_list({ type: "cached" })` filters to cached only
+  - [x] Shows repo name, type, branch, last accessed, size
+  - [x] Returns "No repositories registered" if empty
 
   **Commit**: YES
   - Message: `feat: implement repo_list tool`
@@ -465,7 +465,7 @@ Each TODO includes test requirements. Tests focus on:
 
 ---
 
-- [ ] 5. Implement repo_read tool
+- [x] 5. Implement repo_read tool
 
   **What to do**:
   - Add `repo_read` tool to plugin
@@ -506,11 +506,11 @@ Each TODO includes test requirements. Tests focus on:
   ```
 
   **Acceptance Criteria**:
-  - [ ] `repo_read({ repo: "vercel/next.js", path: "README.md" })` returns file content
-  - [ ] `repo_read({ repo: "vercel/next.js", path: "src/*.ts" })` returns multiple files
-  - [ ] Returns error if repo not in manifest: "Repository not found. Run repo_clone first."
-  - [ ] Updates lastAccessed in manifest after read
-  - [ ] Truncates large files with note: "[truncated at 500 lines]"
+  - [x] `repo_read({ repo: "vercel/next.js", path: "README.md" })` returns file content
+  - [x] `repo_read({ repo: "vercel/next.js", path: "src/*.ts" })` returns multiple files
+  - [x] Returns error if repo not in manifest: "Repository not found. Run repo_clone first."
+  - [x] Updates lastAccessed in manifest after read
+  - [x] Truncates large files with note: "[truncated at 500 lines]"
 
   **Commit**: YES
   - Message: `feat: implement repo_read tool`
@@ -519,7 +519,7 @@ Each TODO includes test requirements. Tests focus on:
 
 ---
 
-- [ ] 6. Implement scanner module
+- [x] 6. Implement scanner module
 
   **What to do**:
   - Implement local repo scanner using `fd`
@@ -554,12 +554,12 @@ Each TODO includes test requirements. Tests focus on:
   ```
 
   **Acceptance Criteria**:
-  - [ ] `src/scanner.ts` exports: `scanLocalRepos`, `matchRemoteToSpec`
-  - [ ] `scanLocalRepos(paths)` returns array of `{ path, remote, branch }`
-  - [ ] Handles repos without remote (skips them)
-  - [ ] Respects max-depth of 4 to avoid deep nesting
-  - [ ] `matchRemoteToSpec("git@github.com:vercel/next.js.git")` returns `"vercel/next.js"`
-  - [ ] Handles both SSH and HTTPS remote formats
+  - [x] `src/scanner.ts` exports: `scanLocalRepos`, `matchRemoteToSpec`
+  - [x] `scanLocalRepos(paths)` returns array of `{ path, remote, branch }`
+  - [x] Handles repos without remote (skips them)
+  - [x] Respects max-depth of 4 to avoid deep nesting
+  - [x] `matchRemoteToSpec("git@github.com:vercel/next.js.git")` returns `"vercel/next.js"`
+  - [x] Handles both SSH and HTTPS remote formats
 
   **Commit**: YES
   - Message: `feat: implement local repo scanner`
@@ -568,7 +568,7 @@ Each TODO includes test requirements. Tests focus on:
 
 ---
 
-- [ ] 7. Implement repo_scan tool
+- [x] 7. Implement repo_scan tool
 
   **What to do**:
   - Add `repo_scan` tool to plugin
@@ -614,11 +614,11 @@ Each TODO includes test requirements. Tests focus on:
   ```
 
   **Acceptance Criteria**:
-  - [ ] `repo_scan()` uses paths from config file
-  - [ ] `repo_scan({ paths: ["~/custom"] })` overrides config
-  - [ ] Found repos added to manifest as `type: "local"`
-  - [ ] Returns summary: "Found 5 repos in 3 paths. 2 new, 3 already registered."
-  - [ ] Handles missing config: "No search paths configured. Create ~/.config/opencode/opencode-repos.json"
+  - [x] `repo_scan()` uses paths from config file
+  - [x] `repo_scan({ paths: ["~/custom"] })` overrides config
+  - [x] Found repos added to manifest as `type: "local"`
+  - [x] Returns summary: "Found 5 repos in 3 paths. 2 new, 3 already registered."
+  - [x] Handles missing config: "No search paths configured. Create ~/.config/opencode/opencode-repos.json"
 
   **Commit**: YES
   - Message: `feat: implement repo_scan tool`
@@ -627,7 +627,7 @@ Each TODO includes test requirements. Tests focus on:
 
 ---
 
-- [ ] 8a. Implement repo_update tool
+- [x] 8a. Implement repo_update tool
 
   **What to do**:
   - Add `repo_update` tool to plugin
@@ -660,10 +660,10 @@ Each TODO includes test requirements. Tests focus on:
   ```
 
   **Acceptance Criteria**:
-  - [ ] `repo_update("vercel/next.js")` fetches and resets cached repo
-  - [ ] Returns: "Updated vercel/next.js@canary to latest (abc1234)"
-  - [ ] For local repos: "Local repo - showing status only:\n[git status output]"
-  - [ ] Updates lastUpdated in manifest
+  - [x] `repo_update("vercel/next.js")` fetches and resets cached repo
+  - [x] Returns: "Updated vercel/next.js@canary to latest (abc1234)"
+  - [x] For local repos: "Local repo - showing status only:\n[git status output]"
+  - [x] Updates lastUpdated in manifest
 
   **Commit**: YES (combined with 8b)
   - Message: `feat: implement repo_update and repo_remove tools`
@@ -672,7 +672,7 @@ Each TODO includes test requirements. Tests focus on:
 
 ---
 
-- [ ] 8b. Implement repo_remove tool
+- [x] 8b. Implement repo_remove tool
 
   **What to do**:
   - Add `repo_remove` tool to plugin
@@ -706,9 +706,9 @@ Each TODO includes test requirements. Tests focus on:
   ```
 
   **Acceptance Criteria**:
-  - [ ] `repo_remove("vercel/next.js")` without confirm: "This will delete cached repo. Use confirm: true to proceed."
-  - [ ] `repo_remove("vercel/next.js", { confirm: true })` deletes and removes from manifest
-  - [ ] `repo_remove("my-local")` unregisters without deleting: "Unregistered my-local (files preserved at /path)"
+  - [x] `repo_remove("vercel/next.js")` without confirm: "This will delete cached repo. Use confirm: true to proceed."
+  - [x] `repo_remove("vercel/next.js", { confirm: true })` deletes and removes from manifest
+  - [x] `repo_remove("my-local")` unregisters without deleting: "Unregistered my-local (files preserved at /path)"
 
   **Commit**: YES (combined with 8a)
   - Message: `feat: implement repo_update and repo_remove tools`
@@ -717,7 +717,7 @@ Each TODO includes test requirements. Tests focus on:
 
 ---
 
-- [ ] 9. Define repo-explorer agent
+- [x] 9. Define repo-explorer agent
 
   **What to do**:
   - Create agent definition in `src/agents/repo-explorer.ts`
@@ -780,10 +780,10 @@ You are READ-ONLY. You cannot modify files or create new ones.`
   ```
 
   **Acceptance Criteria**:
-  - [ ] `src/agents/repo-explorer.ts` exports `createRepoExplorerAgent`
-  - [ ] Agent has `mode: "subagent"`
-  - [ ] Agent has `permission: { edit: "deny", write: "deny", task: "deny" }`
-  - [ ] Agent prompt focuses on codebase exploration
+  - [x] `src/agents/repo-explorer.ts` exports `createRepoExplorerAgent`
+  - [x] Agent has `mode: "subagent"`
+  - [x] Agent has `permission: { edit: "deny", write: "deny", task: "deny" }`
+  - [x] Agent prompt focuses on codebase exploration
 
   **Commit**: YES
   - Message: `feat: define repo-explorer agent`
@@ -792,7 +792,7 @@ You are READ-ONLY. You cannot modify files or create new ones.`
 
 ---
 
-- [ ] 10. Implement repo_explore tool and config handler
+- [x] 10. Implement repo_explore tool and config handler
 
   **What to do**:
   - Add config handler to register `repo-explorer` agent
@@ -856,11 +856,11 @@ Available tools: read, glob, grep, bash`
   ```
 
   **Acceptance Criteria**:
-  - [ ] Config handler registers `repo-explorer` agent
-  - [ ] `repo_explore({ repo: "vercel/next.js", question: "How does routing work?" })` spawns explorer
-  - [ ] Explorer runs in context of the specified repo
-  - [ ] Returns exploration results as markdown
-  - [ ] Auto-clones repo if not cached
+  - [x] Config handler registers `repo-explorer` agent
+  - [x] `repo_explore({ repo: "vercel/next.js", question: "How does routing work?" })` spawns explorer
+  - [x] Explorer runs in context of the specified repo
+  - [x] Returns exploration results as markdown
+  - [x] Auto-clones repo if not cached
 
   **Commit**: YES
   - Message: `feat: implement repo_explore tool and config handler`
@@ -869,7 +869,7 @@ Available tools: read, glob, grep, bash`
 
 ---
 
-- [ ] 11. Documentation and final polish
+- [x] 11. Documentation and final polish
 
   **What to do**:
   - Write comprehensive README.md
@@ -917,12 +917,12 @@ Available tools: read, glob, grep, bash`
   ```
 
   **Acceptance Criteria**:
-  - [ ] README.md exists with installation and usage
-  - [ ] All 7 tools documented with examples
-  - [ ] `repo-explorer` agent documented with use cases
-  - [ ] Config file format documented
-  - [ ] Limitations section lists: no submodules, no LFS, shallow only
-  - [ ] `package.json` has keywords: `opencode`, `opencode-plugin`, `repos`, `cache`, `codebase`
+  - [x] README.md exists with installation and usage
+  - [x] All 7 tools documented with examples
+  - [x] `repo-explorer` agent documented with use cases
+  - [x] Config file format documented
+  - [x] Limitations section lists: no submodules, no LFS, shallow only
+  - [x] `package.json` has keywords: `opencode`, `opencode-plugin`, `repos`, `cache`, `codebase`
 
   **Commit**: YES
   - Message: `docs: add comprehensive documentation`
@@ -976,12 +976,12 @@ repo_explore("vercel/next.js", "How does the App Router work?")
 ```
 
 ### Final Checklist
-- [ ] All "Must Have" present
-- [ ] All "Must NOT Have" absent
-- [ ] All tests pass (`bun test`)
-- [ ] Plugin loads in OpenCode
-- [ ] Can clone public and private repos
-- [ ] Local scan discovers existing repos
-- [ ] `repo-explorer` agent registered and available
-- [ ] `repo_explore` tool spawns explorer correctly
-- [ ] Documentation complete
+- [x] All "Must Have" present
+- [x] All "Must NOT Have" absent
+- [x] All tests pass (`bun test`)
+- [x] Plugin loads in OpenCode
+- [x] Can clone public and private repos
+- [x] Local scan discovers existing repos
+- [x] `repo-explorer` agent registered and available
+- [x] `repo_explore` tool spawns explorer correctly
+- [x] Documentation complete
