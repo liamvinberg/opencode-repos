@@ -1,0 +1,1 @@
+- [ ] Some sort of ttl perhaps if over x days since last read then remove it to not take up too much space

@@ -237,7 +237,7 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
 
       repo_list: tool({
         description:
-          "List all registered repositories (cached and local). Shows metadata like type, branch, last accessed, and size.",
+          "List all registered repositories (cached and local). Shows metadata like type, branch, freshness (for cached), and size.",
         args: {
           type: tool.schema
             .enum(["all", "cached", "local"])
@@ -259,17 +259,24 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
           }
 
           let output = "## Registered Repositories\n\n"
-          output += "| Repo | Type | Branch | Last Accessed | Size |\n"
-          output += "|------|------|--------|---------------|------|\n"
+          output += "| Repo | Type | Branch | Last Updated | Size |\n"
+          output += "|------|------|--------|--------------|------|\n"
 
           for (const [repoKey, entry] of filteredRepos) {
             const repoName = repoKey.substring(0, repoKey.lastIndexOf("@"))
-            const lastAccessed = new Date(entry.lastAccessed).toLocaleDateString()
             const size = entry.sizeBytes
               ? `${Math.round(entry.sizeBytes / 1024 / 1024)}MB`
               : "-"
 
-            output += `| ${repoName} | ${entry.type} | ${entry.defaultBranch} | ${lastAccessed} | ${size} |\n`
+            let freshness = "-"
+            if (entry.type === "cached" && entry.lastUpdated) {
+              const daysSinceUpdate = Math.floor(
+                (Date.now() - new Date(entry.lastUpdated).getTime()) / (1000 * 60 * 60 * 24)
+              )
+              freshness = daysSinceUpdate === 0 ? "today" : `${daysSinceUpdate}d ago`
+            }
+
+            output += `| ${repoName} | ${entry.type} | ${entry.defaultBranch} | ${freshness} | ${size} |\n`
           }
 
           const cachedCount = filteredRepos.filter(
@@ -738,7 +745,21 @@ Failed to clone ${args.repo}: ${message}
 Please check that the repository exists and you have access to it.`
             }
           } else {
-            repoPath = manifest.repos[repoKey].path
+            const entry = manifest.repos[repoKey]
+            repoPath = entry.path
+
+            if (entry.type === "cached") {
+              try {
+                await updateRepo(repoPath, branch)
+                await withManifestLock(async () => {
+                  const updatedManifest = await loadManifest()
+                  if (updatedManifest.repos[repoKey]) {
+                    updatedManifest.repos[repoKey].lastUpdated = new Date().toISOString()
+                    await saveManifest(updatedManifest)
+                  }
+                })
+              } catch {}
+            }
           }
 
           const explorationPrompt = `Explore the codebase at ${repoPath} and answer the following question:

@@ -1,6 +1,6 @@
 # opencode-repos
 
-Repository cache, registry, and cross-codebase intelligence for OpenCode agents.
+Repository cache, registry, and cross-codebase intelligence for opencode agents.
 
 ## Features
 
