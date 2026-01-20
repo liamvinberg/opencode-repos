@@ -9,7 +9,7 @@ import {
   withManifestLock,
   type RepoEntry,
 } from "./src/manifest"
-import { scanLocalRepos, matchRemoteToSpec } from "./src/scanner"
+import { scanLocalRepos, matchRemoteToSpec, findLocalRepoByName } from "./src/scanner"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { existsSync } from "node:fs"
@@ -46,6 +46,15 @@ export const OpencodeRepos: Plugin = async ({ client }) => {
         "repo-explorer": explorerAgent,
       }
     },
+
+    "experimental.session.compacting": async (_input, output) => {
+      output.context.push(`## External Repository Access
+When user mentions another project or asks about external code:
+1. Use \`repo_find\` to check if it exists locally or on GitHub
+2. Tell user what you found before cloning
+3. Only clone after user confirms or explicitly requests it`)
+    },
+
     tool: {
       repo_clone: tool({
         description:
@@ -550,6 +559,130 @@ Failed to delete ${args.repo}: ${message}
 
 The repository has been unregistered from the manifest. You may need to manually delete the directory at: ${entry.path}`
           }
+        },
+      }),
+
+      repo_find: tool({
+        description:
+          "Search for a repository locally and on GitHub. Use this BEFORE cloning to check if a repo already exists locally or to find the correct GitHub repo. Returns location info without cloning.",
+        args: {
+          query: tool.schema
+            .string()
+            .describe(
+              "Repository name or owner/repo format. Examples: 'next.js', 'vercel/next.js', 'react'"
+            ),
+        },
+        async execute(args) {
+          const query = args.query.trim()
+          const results: {
+            registered: Array<{ key: string; path: string; type: string }>
+            local: Array<{ path: string; spec: string; branch: string }>
+            github: Array<{ fullName: string; description: string; url: string }>
+          } = {
+            registered: [],
+            local: [],
+            github: [],
+          }
+
+          const manifest = await loadManifest()
+          const queryLower = query.toLowerCase()
+
+          for (const [repoKey, entry] of Object.entries(manifest.repos)) {
+            if (repoKey.toLowerCase().includes(queryLower)) {
+              results.registered.push({
+                key: repoKey,
+                path: entry.path,
+                type: entry.type,
+              })
+            }
+          }
+
+          const config = await loadConfig()
+          if (config?.localSearchPaths?.length) {
+            try {
+              const localResults = await findLocalRepoByName(
+                config.localSearchPaths,
+                query
+              )
+              for (const local of localResults) {
+                const alreadyRegistered = results.registered.some(
+                  (r) => r.path === local.path
+                )
+                if (!alreadyRegistered) {
+                  results.local.push({
+                    path: local.path,
+                    spec: local.spec,
+                    branch: local.branch,
+                  })
+                }
+              }
+            } catch {}
+          }
+
+          try {
+            if (query.includes("/")) {
+              const repoCheck =
+                await $`gh repo view ${query} --json nameWithOwner,description,url 2>/dev/null`.text()
+              const repo = JSON.parse(repoCheck)
+              results.github.push({
+                fullName: repo.nameWithOwner,
+                description: repo.description || "",
+                url: repo.url,
+              })
+            } else {
+              const searchResult =
+                await $`gh search repos ${query} --limit 5 --json fullName,description,url 2>/dev/null`.text()
+              const repos = JSON.parse(searchResult)
+              for (const repo of repos) {
+                results.github.push({
+                  fullName: repo.fullName,
+                  description: repo.description || "",
+                  url: repo.url,
+                })
+              }
+            }
+          } catch {}
+
+          let output = `## Repository Search: "${query}"\n\n`
+
+          if (results.registered.length > 0) {
+            output += `### Already Registered\n`
+            for (const r of results.registered) {
+              output += `- **${r.key}** (${r.type})\n  Path: ${r.path}\n`
+            }
+            output += `\n`
+          }
+
+          if (results.local.length > 0) {
+            output += `### Found Locally (not registered)\n`
+            for (const r of results.local) {
+              output += `- **${r.spec}** @ ${r.branch}\n  Path: ${r.path}\n`
+            }
+            output += `\nUse \`repo_scan()\` to register these.\n\n`
+          }
+
+          if (results.github.length > 0) {
+            output += `### Found on GitHub\n`
+            for (const r of results.github) {
+              const desc = r.description ? ` - ${r.description.slice(0, 60)}` : ""
+              output += `- **${r.fullName}**${desc}\n`
+            }
+            output += `\nUse \`repo_clone({ repo: "owner/repo" })\` to clone.\n`
+          }
+
+          if (
+            results.registered.length === 0 &&
+            results.local.length === 0 &&
+            results.github.length === 0
+          ) {
+            output += `No repositories found matching "${query}".\n\n`
+            output += `Tips:\n`
+            output += `- Try a different search term\n`
+            output += `- Use owner/repo format for exact match\n`
+            output += `- Check if gh CLI is authenticated\n`
+          }
+
+          return output
         },
       }),
 

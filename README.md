@@ -73,6 +73,34 @@ Create `~/.config/opencode/opencode-repos.json` to configure local repository sc
 
 ## Tools
 
+### repo_find
+
+Search for a repository locally and on GitHub. Use this before cloning to check if a repo already exists locally or to find the correct GitHub repo.
+
+**Arguments:**
+- `query` (string, required): Repository name or owner/repo format. Examples: `"next.js"`, `"vercel/next.js"`, `"react"`
+
+**Examples:**
+```typescript
+// Search by name (fuzzy)
+repo_find({ query: "next.js" })
+
+// Search by exact owner/repo
+repo_find({ query: "vercel/next.js" })
+
+// Find a library
+repo_find({ query: "react" })
+```
+
+**Returns:** Results grouped by location:
+- **Already Registered** - Repos in manifest (cached or local)
+- **Found Locally** - Repos on filesystem not yet registered
+- **Found on GitHub** - Repos available to clone
+
+**Note:** Requires `gh` CLI for GitHub search. Configure `localSearchPaths` in config for local filesystem search.
+
+---
+
 ### repo_clone
 
 Clone a repository to local cache or return path if already cached.
