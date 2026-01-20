@@ -14,7 +14,6 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { existsSync } from "node:fs"
 import { rm, readFile } from "node:fs/promises"
-import { glob } from "glob"
 
 interface Config {
   localSearchPaths: string[]
@@ -184,13 +183,14 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
           const repoPath = entry.path
           const fullPath = join(repoPath, args.path)
 
-          let filePaths: string[] = []
+        let filePaths: string[] = []
 
-          if (args.path.includes("*") || args.path.includes("?")) {
-            filePaths = await glob(fullPath, { nodir: true })
-          } else {
-            filePaths = [fullPath]
-          }
+        if (args.path.includes("*") || args.path.includes("?")) {
+          const fdResult = await $`fd -t f -g ${args.path} ${repoPath}`.text()
+          filePaths = fdResult.split("\n").filter(Boolean)
+        } else {
+          filePaths = [fullPath]
+        }
 
           if (filePaths.length === 0) {
             return `No files found matching path: ${args.path}`
