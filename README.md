@@ -59,7 +59,7 @@ repo_explore({
 
 ## Configuration
 
-Create `~/.config/opencode/opencode-repos.json` to configure local repository scanning:
+Create `~/.config/opencode/opencode-repos.json` to configure the plugin:
 
 ```json
 {
@@ -67,9 +67,17 @@ Create `~/.config/opencode/opencode-repos.json` to configure local repository sc
     "~/projects",
     "~/personal/projects",
     "~/code"
-  ]
+  ],
+  "cleanupMaxAgeDays": 30
 }
 ```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `localSearchPaths` | `[]` | Directories to scan for local git repositories |
+| `cleanupMaxAgeDays` | `30` | Auto-delete cached repos not accessed in this many days |
+
+Cleanup runs automatically on plugin load.
 
 ## Tools
 
@@ -354,6 +362,7 @@ repo_read({ repo: "my-org/api-service", path: "src/routes/*.ts" })
 - **GitHub only**: Remote URL parsing only supports GitHub (SSH and HTTPS formats)
 - **Read-only for local repos**: The plugin never modifies local repositories (type: "local")
 - **No diff/blame**: Use git directly for advanced git operations
+- **Single branch per repo**: Each repo has one directory; switching branches replaces the working tree (no parallel branch access)
 
 ---
 

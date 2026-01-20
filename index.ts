@@ -16,8 +16,11 @@ import { existsSync } from "node:fs"
 import { rm, readFile } from "node:fs/promises"
 
 interface Config {
-  localSearchPaths: string[]
+  localSearchPaths?: string[]
+  cleanupMaxAgeDays?: number
 }
+
+const DEFAULT_CLEANUP_MAX_AGE_DAYS = 30
 
 async function loadConfig(): Promise<Config | null> {
   const configPath = join(homedir(), ".config", "opencode", "opencode-repos.json")
@@ -36,7 +39,48 @@ async function loadConfig(): Promise<Config | null> {
 
 const CACHE_DIR = join(homedir(), ".cache", "opencode-repos")
 
+async function runCleanup(maxAgeDays: number): Promise<void> {
+  const cutoffMs = Date.now() - (maxAgeDays * 24 * 60 * 60 * 1000)
+
+  try {
+    const manifest = await loadManifest()
+    const staleKeys: string[] = []
+
+    for (const [repoKey, entry] of Object.entries(manifest.repos)) {
+      if (entry.type !== "cached") continue
+
+      const lastAccessedMs = new Date(entry.lastAccessed).getTime()
+      if (lastAccessedMs < cutoffMs) {
+        staleKeys.push(repoKey)
+      }
+    }
+
+    if (staleKeys.length === 0) return
+
+    await withManifestLock(async () => {
+      const updatedManifest = await loadManifest()
+
+      for (const key of staleKeys) {
+        const entry = updatedManifest.repos[key]
+        if (!entry || entry.type !== "cached") continue
+
+        try {
+          await rm(entry.path, { recursive: true, force: true })
+          delete updatedManifest.repos[key]
+        } catch {}
+      }
+
+      await saveManifest(updatedManifest)
+    })
+  } catch {}
+}
+
 export const OpencodeRepos: Plugin = async ({ client }) => {
+  const config = await loadConfig()
+  const maxAgeDays = config?.cleanupMaxAgeDays ?? DEFAULT_CLEANUP_MAX_AGE_DAYS
+
+  runCleanup(maxAgeDays)
+
   return {
     config: async (config) => {
       const explorerAgent = createRepoExplorerAgent()
@@ -845,87 +889,6 @@ Failed to spawn exploration agent: ${message}
 
 This may indicate an issue with the OpenCode session or agent registration.`
           }
-        },
-      }),
-
-      repo_cleanup: tool({
-        description:
-          "Remove cached repositories that haven't been accessed in a specified number of days. Only affects cached repos (not local). Use dryRun to preview what would be deleted.",
-        args: {
-          maxAgeDays: tool.schema
-            .number()
-            .optional()
-            .default(30)
-            .describe("Remove repos not accessed in this many days (default: 30)"),
-          dryRun: tool.schema
-            .boolean()
-            .optional()
-            .default(true)
-            .describe("Preview what would be deleted without actually deleting (default: true)"),
-        },
-        async execute(args) {
-          const maxAgeDays = args.maxAgeDays ?? 30
-          const dryRun = args.dryRun ?? true
-          const cutoffMs = Date.now() - (maxAgeDays * 24 * 60 * 60 * 1000)
-
-          const manifest = await loadManifest()
-          const staleRepos: Array<{ key: string; path: string; lastAccessed: string }> = []
-
-          for (const [repoKey, entry] of Object.entries(manifest.repos)) {
-            if (entry.type !== "cached") continue
-
-            const lastAccessedMs = new Date(entry.lastAccessed).getTime()
-            if (lastAccessedMs < cutoffMs) {
-              staleRepos.push({
-                key: repoKey,
-                path: entry.path,
-                lastAccessed: entry.lastAccessed,
-              })
-            }
-          }
-
-          if (staleRepos.length === 0) {
-            return `## No stale repositories found
-
-No cached repositories are older than ${maxAgeDays} days.`
-          }
-
-          if (dryRun) {
-            let output = `## Cleanup Preview (dry run)\n\n`
-            output += `Found ${staleRepos.length} cached repo(s) not accessed in ${maxAgeDays}+ days:\n\n`
-            for (const repo of staleRepos) {
-              const daysAgo = Math.floor((Date.now() - new Date(repo.lastAccessed).getTime()) / (1000 * 60 * 60 * 24))
-              output += `- **${repo.key}** (${daysAgo}d ago)\n  ${repo.path}\n`
-            }
-            output += `\nTo delete these: \`repo_cleanup({ maxAgeDays: ${maxAgeDays}, dryRun: false })\``
-            return output
-          }
-
-          let deletedCount = 0
-          let failedCount = 0
-
-          await withManifestLock(async () => {
-            const updatedManifest = await loadManifest()
-
-            for (const repo of staleRepos) {
-              try {
-                await rm(repo.path, { recursive: true, force: true })
-                delete updatedManifest.repos[repo.key]
-                deletedCount++
-              } catch {
-                failedCount++
-              }
-            }
-
-            await saveManifest(updatedManifest)
-          })
-
-          return `## Cleanup Complete
-
-**Deleted**: ${deletedCount} cached repo(s)
-**Failed**: ${failedCount} repo(s)
-
-${deletedCount > 0 ? "Repositories have been permanently removed from disk." : ""}`
         },
       }),
     },
