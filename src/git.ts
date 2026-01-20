@@ -63,7 +63,7 @@ export async function cloneRepo(
   const branch = options.branch || "main"
 
   try {
-    await $`git clone --depth=1 --single-branch --branch ${branch} --config core.hooksPath=/dev/null ${url} ${destPath}`.quiet()
+    await $`git clone --depth=1 --branch ${branch} --config core.hooksPath=/dev/null ${url} ${destPath}`.quiet()
   } catch (error) {
     try {
       await rm(destPath, { recursive: true, force: true })
@@ -72,7 +72,19 @@ export async function cloneRepo(
   }
 }
 
-export async function updateRepo(path: string, branch: string = "main"): Promise<void> {
+export async function switchBranch(path: string, branch: string): Promise<void> {
+  await $`git -C ${path} fetch origin ${branch} --depth=1`.quiet()
+  try {
+    await $`git -C ${path} checkout ${branch}`.quiet()
+  } catch {
+    await $`git -C ${path} checkout -b ${branch} origin/${branch}`.quiet()
+  }
+  await $`git -C ${path} reset --hard origin/${branch}`.quiet()
+}
+
+export async function updateRepo(path: string): Promise<void> {
+  const currentBranch = await $`git -C ${path} branch --show-current`.text()
+  const branch = currentBranch.trim() || "main"
   await $`git -C ${path} fetch origin ${branch} --depth=1`.quiet()
   await $`git -C ${path} reset --hard origin/${branch}`.quiet()
 }

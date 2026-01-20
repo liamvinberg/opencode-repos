@@ -9,7 +9,7 @@ export interface RepoEntry {
   lastAccessed: string
   lastUpdated?: string
   sizeBytes?: number
-  defaultBranch: string
+  currentBranch: string
   shallow: boolean
 }
 

@@ -1,1 +1,2 @@
-- [ ] Some sort of ttl perhaps if over x days since last read then remove it to not take up too much space
+- [x] Some sort of ttl perhaps if over x days since last read then remove it to not take up too much space
+  - Implemented via `repo_cleanup` tool with configurable TTL (default 30 days)

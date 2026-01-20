@@ -1,7 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import { $ } from "bun"
-import { parseRepoSpec, buildGitUrl, cloneRepo, updateRepo, getRepoInfo } from "./src/git"
+import { parseRepoSpec, buildGitUrl, cloneRepo, updateRepo, switchBranch, getRepoInfo } from "./src/git"
 import { createRepoExplorerAgent } from "./src/agents/repo-explorer"
 import {
   loadManifest,
@@ -73,28 +73,30 @@ When user mentions another project or asks about external code:
         async execute(args) {
           const spec = parseRepoSpec(args.repo)
           const branch = spec.branch || "main"
-          const repoKey = `${spec.owner}/${spec.repo}@${branch}`
+          const repoKey = `${spec.owner}/${spec.repo}`
 
           const result = await withManifestLock(async () => {
             const manifest = await loadManifest()
-
             const existingEntry = manifest.repos[repoKey]
+            const destPath = join(CACHE_DIR, spec.owner, spec.repo)
+
             if (existingEntry && !args.force) {
+              if (existingEntry.currentBranch !== branch) {
+                await switchBranch(existingEntry.path, branch)
+                existingEntry.currentBranch = branch
+                existingEntry.lastUpdated = new Date().toISOString()
+              }
               existingEntry.lastAccessed = new Date().toISOString()
               await saveManifest(manifest)
 
               return {
                 path: existingEntry.path,
+                branch,
                 status: "cached" as const,
                 alreadyExists: true,
               }
             }
 
-            const destPath = join(
-              CACHE_DIR,
-              spec.owner,
-              `${spec.repo}@${branch}`
-            )
             const url = buildGitUrl(spec.owner, spec.repo)
 
             if (args.force && existingEntry) {
@@ -118,7 +120,7 @@ When user mentions another project or asks about external code:
               clonedAt: now,
               lastAccessed: now,
               lastUpdated: now,
-              defaultBranch: branch,
+              currentBranch: branch,
               shallow: true,
             }
             manifest.repos[repoKey] = entry
@@ -127,6 +129,7 @@ When user mentions another project or asks about external code:
 
             return {
               path: destPath,
+              branch,
               status: "cloned" as const,
               alreadyExists: false,
             }
@@ -138,7 +141,8 @@ When user mentions another project or asks about external code:
 
           return `## ${statusText}
 
-**Repository**: ${args.repo}
+**Repository**: ${repoKey}
+**Branch**: ${result.branch}
 **Path**: ${result.path}
 **Status**: ${result.status}
 
@@ -167,7 +171,7 @@ You can now use \`repo_read\` to access files from this repository.`
         async execute(args) {
           const spec = parseRepoSpec(args.repo)
           const branch = spec.branch || "main"
-          const repoKey = `${spec.owner}/${spec.repo}@${branch}`
+          const repoKey = `${spec.owner}/${spec.repo}`
 
           const manifest = await loadManifest()
           const entry = manifest.repos[repoKey]
@@ -175,28 +179,40 @@ You can now use \`repo_read\` to access files from this repository.`
           if (!entry) {
             return `## Repository not found
 
-Repository \`${args.repo}\` is not registered.
+Repository \`${spec.owner}/${spec.repo}\` is not registered.
 
 Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
+          }
+
+          if (entry.type === "cached" && entry.currentBranch !== branch) {
+            await switchBranch(entry.path, branch)
+            await withManifestLock(async () => {
+              const updatedManifest = await loadManifest()
+              if (updatedManifest.repos[repoKey]) {
+                updatedManifest.repos[repoKey].currentBranch = branch
+                updatedManifest.repos[repoKey].lastUpdated = new Date().toISOString()
+                await saveManifest(updatedManifest)
+              }
+            })
           }
 
           const repoPath = entry.path
           const fullPath = join(repoPath, args.path)
 
-        let filePaths: string[] = []
+          let filePaths: string[] = []
 
-        if (args.path.includes("*") || args.path.includes("?")) {
-          const fdResult = await $`fd -t f -g ${args.path} ${repoPath}`.text()
-          filePaths = fdResult.split("\n").filter(Boolean)
-        } else {
-          filePaths = [fullPath]
-        }
+          if (args.path.includes("*") || args.path.includes("?")) {
+            const fdResult = await $`fd -t f -g ${args.path} ${repoPath}`.text()
+            filePaths = fdResult.split("\n").filter(Boolean)
+          } else {
+            filePaths = [fullPath]
+          }
 
           if (filePaths.length === 0) {
             return `No files found matching path: ${args.path}`
           }
 
-          let output = `## Files from ${args.repo}\n\n`
+          let output = `## Files from ${repoKey} @ ${branch}\n\n`
           const maxLines = args.maxLines ?? 500
 
           for (const filePath of filePaths) {
@@ -237,7 +253,7 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
 
       repo_list: tool({
         description:
-          "List all registered repositories (cached and local). Shows metadata like type, branch, freshness (for cached), and size.",
+          "List all registered repositories (cached and local). Shows metadata like type, current branch, freshness (for cached), and size.",
         args: {
           type: tool.schema
             .enum(["all", "cached", "local"])
@@ -263,7 +279,6 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
           output += "|------|------|--------|--------------|------|\n"
 
           for (const [repoKey, entry] of filteredRepos) {
-            const repoName = repoKey.substring(0, repoKey.lastIndexOf("@"))
             const size = entry.sizeBytes
               ? `${Math.round(entry.sizeBytes / 1024 / 1024)}MB`
               : "-"
@@ -276,7 +291,7 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
               freshness = daysSinceUpdate === 0 ? "today" : `${daysSinceUpdate}d ago`
             }
 
-            output += `| ${repoName} | ${entry.type} | ${entry.defaultBranch} | ${freshness} | ${size} |\n`
+            output += `| ${repoKey} | ${entry.type} | ${entry.currentBranch} | ${freshness} | ${size} |\n`
           }
 
           const cachedCount = filteredRepos.filter(
@@ -348,7 +363,7 @@ No git repositories with remotes were found.`
               if (!spec) continue
 
               const branch = repo.branch || "main"
-              const repoKey = `${spec}@${branch}`
+              const repoKey = spec
 
               if (manifest.repos[repoKey]) {
                 existingCount++
@@ -360,7 +375,7 @@ No git repositories with remotes were found.`
                 type: "local",
                 path: repo.path,
                 lastAccessed: now,
-                defaultBranch: branch,
+                currentBranch: branch,
                 shallow: false,
               }
 
@@ -384,7 +399,7 @@ ${newCount > 0 ? "Use `repo_list()` to see all registered repositories." : ""}`
 
       repo_update: tool({
         description:
-          "Update a cached repository to latest. For local repos, shows git status without modifying. Only cached repos (cloned via repo_clone) are updated.",
+          "Update a cached repository to latest. Optionally switch to a different branch first. For local repos, shows git status without modifying.",
         args: {
           repo: tool.schema
             .string()
@@ -394,8 +409,8 @@ ${newCount > 0 ? "Use `repo_list()` to see all registered repositories." : ""}`
         },
         async execute(args) {
           const spec = parseRepoSpec(args.repo)
-          const branch = spec.branch || "main"
-          const repoKey = `${spec.owner}/${spec.repo}@${branch}`
+          const requestedBranch = spec.branch
+          const repoKey = `${spec.owner}/${spec.repo}`
 
           const manifest = await loadManifest()
           const entry = manifest.repos[repoKey]
@@ -403,7 +418,7 @@ ${newCount > 0 ? "Use `repo_list()` to see all registered repositories." : ""}`
           if (!entry) {
             return `## Repository not found
 
-Repository \`${args.repo}\` is not registered.
+Repository \`${repoKey}\` is not registered.
 
 Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
           }
@@ -414,8 +429,9 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
 
               return `## Local Repository Status
 
-**Repository**: ${args.repo}
+**Repository**: ${repoKey}
 **Path**: ${entry.path}
+**Branch**: ${entry.currentBranch}
 **Type**: Local (not modified by plugin)
 
 \`\`\`
@@ -425,18 +441,25 @@ ${status || "Working tree clean"}
               const message = error instanceof Error ? error.message : String(error)
               return `## Error getting status
 
-Failed to get git status for ${args.repo}: ${message}`
+Failed to get git status for ${repoKey}: ${message}`
             }
           }
 
           try {
-            await updateRepo(entry.path, branch)
+            const targetBranch = requestedBranch || entry.currentBranch
+
+            if (targetBranch !== entry.currentBranch) {
+              await switchBranch(entry.path, targetBranch)
+            } else {
+              await updateRepo(entry.path)
+            }
 
             const info = await getRepoInfo(entry.path)
 
             await withManifestLock(async () => {
               const updatedManifest = await loadManifest()
               if (updatedManifest.repos[repoKey]) {
+                updatedManifest.repos[repoKey].currentBranch = targetBranch
                 updatedManifest.repos[repoKey].lastUpdated = new Date().toISOString()
                 updatedManifest.repos[repoKey].lastAccessed = new Date().toISOString()
                 await saveManifest(updatedManifest)
@@ -445,9 +468,9 @@ Failed to get git status for ${args.repo}: ${message}`
 
             return `## Repository Updated
 
-**Repository**: ${args.repo}
+**Repository**: ${repoKey}
 **Path**: ${entry.path}
-**Branch**: ${branch}
+**Branch**: ${targetBranch}
 **Latest Commit**: ${info.commit.substring(0, 7)}
 
 Repository has been updated to the latest commit.`
@@ -455,7 +478,7 @@ Repository has been updated to the latest commit.`
             const message = error instanceof Error ? error.message : String(error)
             return `## Update Failed
 
-Failed to update ${args.repo}: ${message}
+Failed to update ${repoKey}: ${message}
 
 The repository may be corrupted. Try \`repo_clone({ repo: "${args.repo}", force: true })\` to re-clone.`
           }
@@ -469,7 +492,7 @@ The repository may be corrupted. Try \`repo_clone({ repo: "${args.repo}", force:
           repo: tool.schema
             .string()
             .describe(
-              "Repository in format 'owner/repo' or 'owner/repo@branch'"
+              "Repository in format 'owner/repo'"
             ),
           confirm: tool.schema
             .boolean()
@@ -479,8 +502,7 @@ The repository may be corrupted. Try \`repo_clone({ repo: "${args.repo}", force:
         },
         async execute(args) {
           const spec = parseRepoSpec(args.repo)
-          const branch = spec.branch || "main"
-          const repoKey = `${spec.owner}/${spec.repo}@${branch}`
+          const repoKey = `${spec.owner}/${spec.repo}`
 
           const manifest = await loadManifest()
           const entry = manifest.repos[repoKey]
@@ -488,7 +510,7 @@ The repository may be corrupted. Try \`repo_clone({ repo: "${args.repo}", force:
           if (!entry) {
             return `## Repository not found
 
-Repository \`${args.repo}\` is not registered.
+Repository \`${repoKey}\` is not registered.
 
 Use \`repo_list()\` to see all registered repositories.`
           }
@@ -510,7 +532,7 @@ Use \`repo_list()\` to see all registered repositories.`
 
             return `## Local Repository Unregistered
 
-**Repository**: ${args.repo}
+**Repository**: ${repoKey}
 **Path**: ${entry.path}
 
 The repository has been unregistered. Files are preserved at the path above.
@@ -521,13 +543,13 @@ To re-register, run \`repo_scan()\`.`
           if (!args.confirm) {
             return `## Confirmation Required
 
-**Repository**: ${args.repo}
+**Repository**: ${repoKey}
 **Path**: ${entry.path}
 **Type**: Cached (cloned by plugin)
 
 This will **permanently delete** the cached repository from disk.
 
-To proceed: \`repo_remove({ repo: "${args.repo}", confirm: true })\`
+To proceed: \`repo_remove({ repo: "${repoKey}", confirm: true })\`
 
 To keep the repo but unregister it, manually delete it from \`~/.cache/opencode-repos/manifest.json\`.`
           }
@@ -543,12 +565,12 @@ To keep the repo but unregister it, manually delete it from \`~/.cache/opencode-
 
             return `## Cached Repository Deleted
 
-**Repository**: ${args.repo}
+**Repository**: ${repoKey}
 **Path**: ${entry.path}
 
 The repository has been permanently deleted from disk and unregistered from the cache.
 
-To re-clone: \`repo_clone({ repo: "${args.repo}" })\``
+To re-clone: \`repo_clone({ repo: "${repoKey}" })\``
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
 
@@ -562,7 +584,7 @@ To re-clone: \`repo_clone({ repo: "${args.repo}" })\``
 
             return `## Deletion Failed
 
-Failed to delete ${args.repo}: ${message}
+Failed to delete ${repoKey}: ${message}
 
 The repository has been unregistered from the manifest. You may need to manually delete the directory at: ${entry.path}`
           }
@@ -709,14 +731,14 @@ The repository has been unregistered from the manifest. You may need to manually
         async execute(args, ctx) {
           const spec = parseRepoSpec(args.repo)
           const branch = spec.branch || "main"
-          const repoKey = `${spec.owner}/${spec.repo}@${branch}`
+          const repoKey = `${spec.owner}/${spec.repo}`
 
           let manifest = await loadManifest()
           let repoPath: string
 
           if (!manifest.repos[repoKey]) {
             try {
-              repoPath = join(CACHE_DIR, spec.owner, `${spec.repo}@${branch}`)
+              repoPath = join(CACHE_DIR, spec.owner, spec.repo)
               const url = buildGitUrl(spec.owner, spec.repo)
 
               await withManifestLock(async () => {
@@ -730,7 +752,7 @@ The repository has been unregistered from the manifest. You may need to manually
                   clonedAt: now,
                   lastAccessed: now,
                   lastUpdated: now,
-                  defaultBranch: branch,
+                  currentBranch: branch,
                   shallow: true,
                 }
                 await saveManifest(updatedManifest)
@@ -750,10 +772,15 @@ Please check that the repository exists and you have access to it.`
 
             if (entry.type === "cached") {
               try {
-                await updateRepo(repoPath, branch)
+                if (entry.currentBranch !== branch) {
+                  await switchBranch(repoPath, branch)
+                } else {
+                  await updateRepo(repoPath)
+                }
                 await withManifestLock(async () => {
                   const updatedManifest = await loadManifest()
                   if (updatedManifest.repos[repoKey]) {
+                    updatedManifest.repos[repoKey].currentBranch = branch
                     updatedManifest.repos[repoKey].lastUpdated = new Date().toISOString()
                     await saveManifest(updatedManifest)
                   }
@@ -818,6 +845,87 @@ Failed to spawn exploration agent: ${message}
 
 This may indicate an issue with the OpenCode session or agent registration.`
           }
+        },
+      }),
+
+      repo_cleanup: tool({
+        description:
+          "Remove cached repositories that haven't been accessed in a specified number of days. Only affects cached repos (not local). Use dryRun to preview what would be deleted.",
+        args: {
+          maxAgeDays: tool.schema
+            .number()
+            .optional()
+            .default(30)
+            .describe("Remove repos not accessed in this many days (default: 30)"),
+          dryRun: tool.schema
+            .boolean()
+            .optional()
+            .default(true)
+            .describe("Preview what would be deleted without actually deleting (default: true)"),
+        },
+        async execute(args) {
+          const maxAgeDays = args.maxAgeDays ?? 30
+          const dryRun = args.dryRun ?? true
+          const cutoffMs = Date.now() - (maxAgeDays * 24 * 60 * 60 * 1000)
+
+          const manifest = await loadManifest()
+          const staleRepos: Array<{ key: string; path: string; lastAccessed: string }> = []
+
+          for (const [repoKey, entry] of Object.entries(manifest.repos)) {
+            if (entry.type !== "cached") continue
+
+            const lastAccessedMs = new Date(entry.lastAccessed).getTime()
+            if (lastAccessedMs < cutoffMs) {
+              staleRepos.push({
+                key: repoKey,
+                path: entry.path,
+                lastAccessed: entry.lastAccessed,
+              })
+            }
+          }
+
+          if (staleRepos.length === 0) {
+            return `## No stale repositories found
+
+No cached repositories are older than ${maxAgeDays} days.`
+          }
+
+          if (dryRun) {
+            let output = `## Cleanup Preview (dry run)\n\n`
+            output += `Found ${staleRepos.length} cached repo(s) not accessed in ${maxAgeDays}+ days:\n\n`
+            for (const repo of staleRepos) {
+              const daysAgo = Math.floor((Date.now() - new Date(repo.lastAccessed).getTime()) / (1000 * 60 * 60 * 24))
+              output += `- **${repo.key}** (${daysAgo}d ago)\n  ${repo.path}\n`
+            }
+            output += `\nTo delete these: \`repo_cleanup({ maxAgeDays: ${maxAgeDays}, dryRun: false })\``
+            return output
+          }
+
+          let deletedCount = 0
+          let failedCount = 0
+
+          await withManifestLock(async () => {
+            const updatedManifest = await loadManifest()
+
+            for (const repo of staleRepos) {
+              try {
+                await rm(repo.path, { recursive: true, force: true })
+                delete updatedManifest.repos[repo.key]
+                deletedCount++
+              } catch {
+                failedCount++
+              }
+            }
+
+            await saveManifest(updatedManifest)
+          })
+
+          return `## Cleanup Complete
+
+**Deleted**: ${deletedCount} cached repo(s)
+**Failed**: ${failedCount} repo(s)
+
+${deletedCount > 0 ? "Repositories have been permanently removed from disk." : ""}`
         },
       }),
     },

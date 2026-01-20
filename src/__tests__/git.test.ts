@@ -117,7 +117,7 @@ describe("git operations (integration)", () => {
   })
 
   test("updateRepo fetches and resets", async () => {
-    await updateRepo(repoPath, "master")
+    await updateRepo(repoPath)
     const infoAfter = await getRepoInfo(repoPath)
 
     expect(infoAfter.branch).toBe("master")

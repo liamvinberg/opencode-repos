@@ -35,7 +35,7 @@ describe("loadManifest", () => {
           type: "cached",
           path: "/some/path",
           lastAccessed: "2024-01-01T00:00:00.000Z",
-          defaultBranch: "main",
+          currentBranch: "main",
           shallow: true,
         },
       },
@@ -98,7 +98,7 @@ describe("saveManifest", () => {
           type: "cached",
           path: "/test/path",
           lastAccessed: "2024-01-01T00:00:00.000Z",
-          defaultBranch: "main",
+          currentBranch: "main",
           shallow: false,
         },
       },
@@ -119,13 +119,13 @@ describe("saveManifest", () => {
   test("overwrites existing manifest", async () => {
     const manifest1: Manifest = {
       version: 1,
-      repos: { "first/repo@main": { type: "cached", path: "/first", lastAccessed: "2024-01-01T00:00:00.000Z", defaultBranch: "main", shallow: true } },
+      repos: { "first/repo@main": { type: "cached", path: "/first", lastAccessed: "2024-01-01T00:00:00.000Z", currentBranch: "main", shallow: true } },
       localIndex: {},
     }
 
     const manifest2: Manifest = {
       version: 1,
-      repos: { "second/repo@main": { type: "local", path: "/second", lastAccessed: "2024-02-01T00:00:00.000Z", defaultBranch: "main", shallow: false } },
+      repos: { "second/repo@main": { type: "local", path: "/second", lastAccessed: "2024-02-01T00:00:00.000Z", currentBranch: "main", shallow: false } },
       localIndex: { "url": "/path" },
     }
 
@@ -235,7 +235,7 @@ describe("integration", () => {
         type: "cached",
         path: "/new/path",
         lastAccessed: new Date().toISOString(),
-        defaultBranch: "main",
+        currentBranch: "main",
         shallow: true,
       }
 
