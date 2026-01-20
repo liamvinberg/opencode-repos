@@ -68,7 +68,11 @@ Create `~/.config/opencode/opencode-repos.json` to configure the plugin:
     "~/personal/projects",
     "~/code"
   ],
-  "cleanupMaxAgeDays": 30
+  "cleanupMaxAgeDays": 30,
+  "cacheDir": "~/.cache/opencode-repos",
+  "useHttps": false,
+  "autoSyncOnExplore": true,
+  "defaultBranch": "main"
 }
 ```
 
@@ -76,6 +80,10 @@ Create `~/.config/opencode/opencode-repos.json` to configure the plugin:
 |--------|---------|-------------|
 | `localSearchPaths` | `[]` | Directories to scan for local git repositories |
 | `cleanupMaxAgeDays` | `30` | Auto-delete cached repos not accessed in this many days |
+| `cacheDir` | `~/.cache/opencode-repos` | Where to store cloned repositories |
+| `useHttps` | `false` | Use HTTPS instead of SSH for cloning (useful behind firewalls) |
+| `autoSyncOnExplore` | `true` | Auto-fetch latest before exploring a repo |
+| `defaultBranch` | `"main"` | Default branch when none specified (some repos use "master") |
 
 Cleanup runs automatically on plugin load.
 

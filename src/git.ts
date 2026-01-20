@@ -51,7 +51,10 @@ export function parseRepoSpec(spec: string): RepoSpec {
   return { owner, repo, branch }
 }
 
-export function buildGitUrl(owner: string, repo: string): string {
+export function buildGitUrl(owner: string, repo: string, useHttps: boolean = false): string {
+  if (useHttps) {
+    return `https://github.com/${owner}/${repo}.git`
+  }
   return `git@github.com:${owner}/${repo}.git`
 }
 

@@ -18,9 +18,19 @@ import { rm, readFile } from "node:fs/promises"
 interface Config {
   localSearchPaths?: string[]
   cleanupMaxAgeDays?: number
+  cacheDir?: string
+  useHttps?: boolean
+  autoSyncOnExplore?: boolean
+  defaultBranch?: string
 }
 
-const DEFAULT_CLEANUP_MAX_AGE_DAYS = 30
+const DEFAULTS = {
+  cleanupMaxAgeDays: 30,
+  cacheDir: join(homedir(), ".cache", "opencode-repos"),
+  useHttps: false,
+  autoSyncOnExplore: true,
+  defaultBranch: "main",
+} as const
 
 async function loadConfig(): Promise<Config | null> {
   const configPath = join(homedir(), ".config", "opencode", "opencode-repos.json")
@@ -37,7 +47,7 @@ async function loadConfig(): Promise<Config | null> {
   }
 }
 
-const CACHE_DIR = join(homedir(), ".cache", "opencode-repos")
+
 
 async function runCleanup(maxAgeDays: number): Promise<void> {
   const cutoffMs = Date.now() - (maxAgeDays * 24 * 60 * 60 * 1000)
@@ -76,10 +86,16 @@ async function runCleanup(maxAgeDays: number): Promise<void> {
 }
 
 export const OpencodeRepos: Plugin = async ({ client }) => {
-  const config = await loadConfig()
-  const maxAgeDays = config?.cleanupMaxAgeDays ?? DEFAULT_CLEANUP_MAX_AGE_DAYS
+  const userConfig = await loadConfig()
 
-  runCleanup(maxAgeDays)
+  const cacheDir = userConfig?.cacheDir ?? DEFAULTS.cacheDir
+  const useHttps = userConfig?.useHttps ?? DEFAULTS.useHttps
+  const autoSyncOnExplore = userConfig?.autoSyncOnExplore ?? DEFAULTS.autoSyncOnExplore
+  const defaultBranch = userConfig?.defaultBranch ?? DEFAULTS.defaultBranch
+  const cleanupMaxAgeDays = userConfig?.cleanupMaxAgeDays ?? DEFAULTS.cleanupMaxAgeDays
+  const localSearchPaths = userConfig?.localSearchPaths ?? []
+
+  runCleanup(cleanupMaxAgeDays)
 
   return {
     config: async (config) => {
@@ -101,7 +117,7 @@ When user mentions another project or asks about external code:
     tool: {
       repo_clone: tool({
         description:
-          "Clone a repository to local cache or return path if already cached. Supports public and private (SSH) repos. Example: repo_clone({ repo: 'vercel/next.js' }) or repo_clone({ repo: 'vercel/next.js@canary', force: true })",
+          "Clone a repository to local cache or return path if already cached. Supports public and private repos. Example: repo_clone({ repo: 'vercel/next.js' }) or repo_clone({ repo: 'vercel/next.js@canary', force: true })",
         args: {
           repo: tool.schema
             .string()
@@ -116,13 +132,13 @@ When user mentions another project or asks about external code:
         },
         async execute(args) {
           const spec = parseRepoSpec(args.repo)
-          const branch = spec.branch || "main"
+          const branch = spec.branch || defaultBranch
           const repoKey = `${spec.owner}/${spec.repo}`
 
           const result = await withManifestLock(async () => {
             const manifest = await loadManifest()
             const existingEntry = manifest.repos[repoKey]
-            const destPath = join(CACHE_DIR, spec.owner, spec.repo)
+            const destPath = join(cacheDir, spec.owner, spec.repo)
 
             if (existingEntry && !args.force) {
               if (existingEntry.currentBranch !== branch) {
@@ -141,7 +157,7 @@ When user mentions another project or asks about external code:
               }
             }
 
-            const url = buildGitUrl(spec.owner, spec.repo)
+            const url = buildGitUrl(spec.owner, spec.repo, useHttps)
 
             if (args.force && existingEntry) {
               try {
@@ -214,7 +230,7 @@ You can now use \`repo_read\` to access files from this repository.`
         },
         async execute(args) {
           const spec = parseRepoSpec(args.repo)
-          const branch = spec.branch || "main"
+          const branch = spec.branch || defaultBranch
           const repoKey = `${spec.owner}/${spec.repo}`
 
           const manifest = await loadManifest()
@@ -360,12 +376,7 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
             .describe("Override search paths (default: from config)"),
         },
         async execute(args) {
-          let searchPaths: string[] | null = args.paths || null
-
-          if (!searchPaths) {
-            const config = await loadConfig()
-            searchPaths = config?.localSearchPaths || null
-          }
+          const searchPaths = args.paths ?? (localSearchPaths.length > 0 ? localSearchPaths : null)
 
           if (!searchPaths || searchPaths.length === 0) {
             return `## No search paths configured
@@ -406,7 +417,7 @@ No git repositories with remotes were found.`
               const spec = matchRemoteToSpec(repo.remote)
               if (!spec) continue
 
-              const branch = repo.branch || "main"
+              const branch = repo.branch || defaultBranch
               const repoKey = spec
 
               if (manifest.repos[repoKey]) {
@@ -670,11 +681,10 @@ The repository has been unregistered from the manifest. You may need to manually
             }
           }
 
-          const config = await loadConfig()
-          if (config?.localSearchPaths?.length) {
+          if (localSearchPaths.length > 0) {
             try {
               const localResults = await findLocalRepoByName(
-                config.localSearchPaths,
+                localSearchPaths,
                 query
               )
               for (const local of localResults) {
@@ -774,7 +784,7 @@ The repository has been unregistered from the manifest. You may need to manually
         },
         async execute(args, ctx) {
           const spec = parseRepoSpec(args.repo)
-          const branch = spec.branch || "main"
+          const branch = spec.branch || defaultBranch
           const repoKey = `${spec.owner}/${spec.repo}`
 
           let manifest = await loadManifest()
@@ -782,8 +792,8 @@ The repository has been unregistered from the manifest. You may need to manually
 
           if (!manifest.repos[repoKey]) {
             try {
-              repoPath = join(CACHE_DIR, spec.owner, spec.repo)
-              const url = buildGitUrl(spec.owner, spec.repo)
+              repoPath = join(cacheDir, spec.owner, spec.repo)
+              const url = buildGitUrl(spec.owner, spec.repo, useHttps)
 
               await withManifestLock(async () => {
                 await cloneRepo(url, repoPath, { branch })
@@ -814,7 +824,7 @@ Please check that the repository exists and you have access to it.`
             const entry = manifest.repos[repoKey]
             repoPath = entry.path
 
-            if (entry.type === "cached") {
+            if (entry.type === "cached" && autoSyncOnExplore) {
               try {
                 if (entry.currentBranch !== branch) {
                   await switchBranch(repoPath, branch)

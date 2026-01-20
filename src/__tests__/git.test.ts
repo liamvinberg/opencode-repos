@@ -70,9 +70,14 @@ describe("parseRepoSpec", () => {
 })
 
 describe("buildGitUrl", () => {
-  test("builds SSH URL correctly", () => {
+  test("builds SSH URL by default", () => {
     const url = buildGitUrl("vercel", "next.js")
     expect(url).toBe("git@github.com:vercel/next.js.git")
+  })
+
+  test("builds HTTPS URL when useHttps is true", () => {
+    const url = buildGitUrl("vercel", "next.js", true)
+    expect(url).toBe("https://github.com/vercel/next.js.git")
   })
 
   test("handles various owner/repo names", () => {
