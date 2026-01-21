@@ -145,7 +145,8 @@ async function resolveCandidates(
   query: string,
   searchPaths: string[],
   manifest: Awaited<ReturnType<typeof loadManifest>>,
-  defaultBranch: string
+  defaultBranch: string,
+  allowGithub: boolean
 ): Promise<{
   candidates: RepoCandidate[]
   exactRepoKey: string | null
@@ -210,33 +211,35 @@ async function resolveCandidates(
     } catch {}
   }
 
-  try {
-    if (exactRepoKey) {
-      const repoCheck =
-        await $`gh repo view ${exactRepoKey} --json nameWithOwner,description,url 2>/dev/null`.text()
-      const repo = JSON.parse(repoCheck)
-      candidates.push({
-        key: repo.nameWithOwner,
-        source: "github",
-        description: repo.description || "",
-        url: repo.url,
-        branch: branchOverride ?? defaultBranch,
-      })
-    } else {
-      const searchResult =
-        await $`gh search repos ${trimmed} --limit 5 --json fullName,description,url 2>/dev/null`.text()
-      const repos = JSON.parse(searchResult)
-      for (const repo of repos) {
+  if (allowGithub) {
+    try {
+      if (exactRepoKey) {
+        const repoCheck =
+          await $`gh repo view ${exactRepoKey} --json nameWithOwner,description,url 2>/dev/null`.text()
+        const repo = JSON.parse(repoCheck)
         candidates.push({
-          key: repo.fullName,
+          key: repo.nameWithOwner,
           source: "github",
           description: repo.description || "",
           url: repo.url,
-          branch: defaultBranch,
+          branch: branchOverride ?? defaultBranch,
         })
+      } else {
+        const searchResult =
+          await $`gh search repos ${trimmed} --limit 5 --json fullName,description,url 2>/dev/null`.text()
+        const repos = JSON.parse(searchResult)
+        for (const repo of repos) {
+          candidates.push({
+            key: repo.fullName,
+            source: "github",
+            description: repo.description || "",
+            url: repo.url,
+            branch: defaultBranch,
+          })
+        }
       }
-    }
-  } catch {}
+    } catch {}
+  }
 
   return {
     candidates: uniqueCandidates(candidates),
@@ -1133,6 +1136,53 @@ The repository has been unregistered from the manifest. You may need to manually
         },
       }),
 
+      repo_pick_dir: tool({
+        description:
+          "Open a native folder picker and return the selected path. Call this immediately after the user asks for a local repo (avoid delayed popups if the user is away).",
+        args: {
+          prompt: tool.schema
+            .string()
+            .optional()
+            .describe("Prompt text shown in the picker dialog"),
+        },
+        async execute(args) {
+          const promptText = args.prompt ?? "Select a repository folder"
+          const platform = process.platform
+
+          if (platform === "darwin") {
+            const safePrompt = promptText.replace(/"/g, "\\\"")
+            const script = `POSIX path of (choose folder with prompt "${safePrompt}")`
+            const result = await $`osascript -e ${script}`.text()
+            const selected = result.trim()
+
+            if (!selected) {
+              return "No folder selected."
+            }
+
+            return `## Folder selected\n\n${selected}`
+          }
+
+          if (platform === "win32") {
+            const safePrompt = promptText.replace(/'/g, "''")
+            const command = `[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');` +
+              `$dialog = New-Object System.Windows.Forms.FolderBrowserDialog;` +
+              `$dialog.Description='${safePrompt}';` +
+              `if ($dialog.ShowDialog() -eq 'OK') { $dialog.SelectedPath }`
+
+            const result = await $`powershell -NoProfile -Command ${command}`.text()
+            const selected = result.trim()
+
+            if (!selected) {
+              return "No folder selected."
+            }
+
+            return `## Folder selected\n\n${selected}`
+          }
+
+          return "Folder picker is not supported on this platform."
+        },
+      }),
+
       repo_query: tool({
         description:
           "Resolve a repository automatically and explore it with a subagent. Picks an exact match when possible, otherwise asks you to disambiguate. Can run multiple repos when specified.",
@@ -1186,14 +1236,38 @@ Failed to parse \`${repo}\`: ${message}`
             }
           } else {
             const manifest = await loadManifest()
+            let allowGithub = false
+
+            if (args.query?.includes("/")) {
+              try {
+                parseRepoSpec(args.query)
+                allowGithub = true
+              } catch {
+                allowGithub = false
+              }
+            }
+
             const { candidates, exactRepoKey, branchOverride } = await resolveCandidates(
               args.query!,
               localSearchPaths,
               manifest,
-              defaultBranch
+              defaultBranch,
+              allowGithub
             )
 
             if (candidates.length === 0) {
+              if (!allowGithub) {
+                return `## No local repositories matched
+
+No repositories matched \`${args.query}\` in the local registry.
+
+Provide a local path or configure search paths:
+
+- Use \`repo_pick_dir()\` to select a folder (GUI required)
+- Or set \`localSearchPaths\` in ~/.config/opencode/opencode-repos.json
+- Or pass an explicit repo in \`repos\` (owner/repo)
+`
+              }
               return `## No repositories found
 
 No repositories matched \`${args.query}\`.

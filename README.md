@@ -155,6 +155,22 @@ repo_query({
 
 ---
 
+### repo_pick_dir
+
+Open a native folder picker and return the selected path. Call this immediately after the user asks for a local repo to avoid delayed popups if they step away.
+
+**Arguments:**
+- `prompt` (string, optional): Prompt text shown in the picker dialog
+
+**Examples:**
+```typescript
+repo_pick_dir({ prompt: "Select your firmware repo" })
+```
+
+**Returns:** Selected folder path
+
+---
+
 ### repo_clone
 
 Clone a repository to local cache or return path if already cached.
