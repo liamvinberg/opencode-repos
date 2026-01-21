@@ -14,7 +14,7 @@ import { scanLocalRepos, matchRemoteToSpec, findLocalRepoByName } from "./src/sc
 import { homedir, tmpdir } from "node:os"
 import { dirname, isAbsolute, join } from "node:path"
 import { existsSync } from "node:fs"
-import { rm, readFile } from "node:fs/promises"
+import { appendFile, mkdir, rm, readFile } from "node:fs/promises"
 
 interface Config {
   localSearchPaths?: string[]
@@ -26,6 +26,8 @@ interface Config {
   defaultBranch?: string
   includeProjectParent?: boolean
   debug?: boolean
+  repoExplorerModel?: string
+  debugLogPath?: string
 }
 
 const DEFAULTS = {
@@ -37,7 +39,17 @@ const DEFAULTS = {
   defaultBranch: "main",
   includeProjectParent: true,
   debug: false,
+  repoExplorerModel: "opencode/grok-code",
+  debugLogPath: join(homedir(), ".cache", "opencode-repos", "debug.log"),
 } as const
+
+function parseModelString(modelString: string): { providerID: string; modelID: string } | undefined {
+  const parts = modelString.split("/")
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return undefined
+  }
+  return { providerID: parts[0], modelID: parts[1] }
+}
 
 async function loadConfig(): Promise<Config | null> {
   const configPath = join(homedir(), ".config", "opencode", "opencode-repos.json")
@@ -406,9 +418,50 @@ async function runRepoExplorer(
   ctx: RepoToolContext,
   repoKey: string,
   repoPath: string,
-  question: string
+  question: string,
+  model?: string,
+  parentDirectory?: string
 ): Promise<string> {
   let sessionID: string | undefined
+
+  // Validate that repo-explorer agent is available
+  try {
+    const agentsResult = await client.app.agents()
+    const agents = agentsResult.data ?? []
+    const agentNames = agents.map((a) => a.name)
+    
+    if (debugLogger) {
+      debugLogger("repo_explore", [
+        `repoKey: ${repoKey}`,
+        `availableAgents: ${agentNames.join(", ") || "none"}`,
+        `repoExplorerExists: ${agentNames.includes("repo-explorer")}`,
+      ])
+    }
+    
+    if (!agentNames.includes("repo-explorer")) {
+      return `## Exploration failed
+
+Repository: ${repoKey}
+Path: ${repoPath}
+
+The repo-explorer agent is not available. Available agents: ${agentNames.join(", ") || "none"}
+
+This may indicate the opencode-repos plugin is not properly loaded.`
+    }
+  } catch (error) {
+    if (debugLogger) {
+      const message = error instanceof Error ? error.message : String(error)
+      debugLogger("repo_explore", [
+        `repoKey: ${repoKey}`,
+        `agentValidationError: ${message}`,
+      ])
+    }
+    // Continue anyway - the session.prompt will fail with a clearer error if agent doesn't exist
+  }
+
+  // Use parent directory for session creation (like oh-my-opencode does)
+  // The repoPath will be passed in the prompt context instead
+  const sessionDirectory = parentDirectory ?? repoPath
 
   try {
     const createResult = await client.session.create({
@@ -417,7 +470,7 @@ async function runRepoExplorer(
         title: `Repo explorer: ${repoKey}`,
       },
       query: {
-        directory: repoPath,
+        directory: sessionDirectory,
       },
     })
 
@@ -460,44 +513,200 @@ Remember to:
 - Explain how components interact
 `
 
-  let response: Awaited<ReturnType<RepoClient["session"]["prompt"]>>
+  await Bun.sleep(150)
 
-  try {
-    response = await client.session.prompt({
-      path: { id: sessionID },
-      body: {
-        agent: "repo-explorer",
-        parts: [{ type: "text", text: explorationPrompt }],
-      },
-    })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return `## Exploration failed
+  let promptAttempt = 0
+  const promptMaxAttempts = 3
+
+  const parsedModel = model ? parseModelString(model) : undefined
+
+  while (promptAttempt < promptMaxAttempts) {
+    try {
+      if (debugLogger) {
+        debugLogger("repo_explore", [
+          `repoKey: ${repoKey}`,
+          `sessionID: ${sessionID}`,
+          `promptSending: attempt ${promptAttempt + 1}`,
+          `model: ${parsedModel ? `${parsedModel.providerID}/${parsedModel.modelID}` : "default"}`,
+        ])
+      }
+      await client.session.prompt({
+        path: { id: sessionID },
+        body: {
+          agent: "repo-explorer",
+          tools: {
+            task: false,
+            delegate_task: false,
+          },
+          parts: [{ type: "text", text: explorationPrompt }],
+          ...(parsedModel ? { model: parsedModel } : {}),
+        },
+      })
+      if (debugLogger) {
+        debugLogger("repo_explore", [
+          `repoKey: ${repoKey}`,
+          `sessionID: ${sessionID}`,
+          `promptSent: success`,
+        ])
+      }
+      break
+    } catch (error) {
+      promptAttempt += 1
+      const message = error instanceof Error ? error.message : String(error)
+      if (debugLogger) {
+        debugLogger("repo_explore", [
+          `repoKey: ${repoKey}`,
+          `sessionID: ${sessionID}`,
+          `promptError: ${message}`,
+          `promptAttempt: ${promptAttempt}`,
+        ])
+      }
+
+      if (promptAttempt >= promptMaxAttempts) {
+        return `## Exploration failed
 
 Repository: ${repoKey}
 Session: ${sessionID}
 Path: ${repoPath}
 
 Failed to run exploration agent: ${message}`
+      }
+
+      await Bun.sleep(300 * promptAttempt)
+    }
   }
 
-  if (response.error) {
+  const pollStart = Date.now()
+  const maxPollMs = 5 * 60 * 1000
+  const pollIntervalMs = 500
+  const minStabilityTimeMs = 10000
+  const stabilityPollsRequired = 3
+  let lastMsgCount = 0
+  let stablePolls = 0
+  let pollCount = 0
+
+  if (debugLogger) {
+    debugLogger("repo_explore", [
+      `repoKey: ${repoKey}`,
+      `sessionID: ${sessionID}`,
+      `pollStart: starting poll loop`,
+    ])
+  }
+
+  while (Date.now() - pollStart < maxPollMs) {
+    await Bun.sleep(pollIntervalMs)
+    pollCount++
+
+    try {
+      const statusResult = await client.session.status()
+      const allStatuses = (statusResult.data ?? {}) as Record<string, { type: string }>
+      const sessionStatus = allStatuses[sessionID]
+
+      if (pollCount % 10 === 0 && debugLogger) {
+        debugLogger("repo_explore", [
+          `repoKey: ${repoKey}`,
+          `sessionID: ${sessionID}`,
+          `pollCount: ${pollCount}`,
+          `elapsed: ${Math.floor((Date.now() - pollStart) / 1000)}s`,
+          `sessionStatus: ${sessionStatus?.type ?? "not_in_status"}`,
+          `stablePolls: ${stablePolls}`,
+          `lastMsgCount: ${lastMsgCount}`,
+        ])
+      }
+
+      if (sessionStatus && sessionStatus.type !== "idle") {
+        stablePolls = 0
+        lastMsgCount = 0
+        continue
+      }
+
+      const elapsed = Date.now() - pollStart
+      if (elapsed < minStabilityTimeMs) {
+        continue
+      }
+
+      const messagesResult = await client.session.messages({ path: { id: sessionID } })
+      const messages = messagesResult.data ?? []
+      const currentMsgCount = messages.length
+
+      if (currentMsgCount === lastMsgCount) {
+        stablePolls += 1
+        if (stablePolls >= stabilityPollsRequired) {
+          if (debugLogger) {
+            debugLogger("repo_explore", [
+              `repoKey: ${repoKey}`,
+              `sessionID: ${sessionID}`,
+              `pollComplete: messages stable`,
+              `currentMsgCount: ${currentMsgCount}`,
+            ])
+          }
+          break
+        }
+      } else {
+        stablePolls = 0
+        lastMsgCount = currentMsgCount
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (debugLogger) {
+        debugLogger("repo_explore", [
+          `repoKey: ${repoKey}`,
+          `sessionID: ${sessionID}`,
+          `pollError: ${message}`,
+        ])
+      }
+    }
+  }
+
+  if (Date.now() - pollStart >= maxPollMs) {
     return `## Exploration failed
 
 Repository: ${repoKey}
 Session: ${sessionID}
 Path: ${repoPath}
 
-Error from API: ${JSON.stringify(response.error)}`
+Timed out waiting for subagent output.`
   }
 
-  const parts = response.data?.parts || []
-  const textParts = parts.filter((part) => part.type === "text")
-  const texts = textParts
-    .map((part) => ("text" in part ? part.text : ""))
-    .filter(Boolean)
+  const messagesResult = await client.session.messages({ path: { id: sessionID } })
+  const messages = messagesResult.data ?? []
+  const extracted: string[] = []
 
-  return texts.join("\n\n") || "No response from exploration agent."
+  for (const message of messages) {
+    const parts = message.parts ?? []
+    for (const part of parts) {
+      if (
+        typeof part === "object" &&
+        part &&
+        "type" in part &&
+        (part as { type: string }).type === "text" &&
+        "text" in part
+      ) {
+        const textValue = (part as { text?: string }).text
+        if (textValue) extracted.push(textValue)
+      } else if (
+        typeof part === "object" &&
+        part &&
+        "type" in part &&
+        (part as { type: string }).type === "tool_result"
+      ) {
+        const toolResult = part as { content?: unknown }
+        if (typeof toolResult.content === "string") {
+          extracted.push(toolResult.content)
+        } else if (Array.isArray(toolResult.content)) {
+          for (const block of toolResult.content) {
+            if (block && typeof block === "object" && "text" in block) {
+              const blockText = (block as { text?: string }).text
+              if (blockText) extracted.push(blockText)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const responseText = extracted.filter(Boolean).join("\n\n")
+  return responseText || "No response from exploration agent."
 }
 
 interface RepoToolContext {
@@ -519,13 +728,24 @@ interface RepoClient {
       body: { parentID?: string; title?: string }
       query?: { directory?: string }
     }) => Promise<{ data?: { id?: string } }>
+    get: (input: { path: { id: string } }) => Promise<{ data?: { id?: string; directory?: string } }>
+    status: () => Promise<{ data?: Record<string, { type: string }> }>
+    messages: (input: { path: { id: string } }) => Promise<{ data?: Array<{ parts?: unknown[] }> }>
     prompt: (input: {
       path: { id: string }
-      body: { agent: string; parts: Array<{ type: "text"; text: string }> }
+      body: {
+        agent: string
+        parts: Array<{ type: "text"; text: string }>
+        tools?: Record<string, boolean>
+        model?: { providerID: string; modelID: string }
+      }
     }) => Promise<{
       error?: unknown
       data?: { parts?: Array<{ type: string; text?: string }> }
     }>
+  }
+  app: {
+    agents: () => Promise<{ data?: Array<{ name: string; mode?: string }> }>
   }
 }
 
@@ -596,8 +816,21 @@ function formatRepoQueryDebug(info: RepoQueryDebugInfo): string {
   return output
 }
 
-function appendDebug(output: string, toolName: string, lines: string[], enabled: boolean): string {
+type DebugLogger = (toolName: string, lines: string[]) => void
+
+let debugLogger: DebugLogger | null = null
+
+function appendDebug(
+  output: string,
+  toolName: string,
+  lines: string[],
+  enabled: boolean
+): string {
   if (!enabled) return output
+
+  if (debugLogger) {
+    debugLogger(toolName, lines)
+  }
 
   let section = `\n\n## Debug\n\nTool: ${toolName}\n`
   for (const line of lines) {
@@ -605,6 +838,35 @@ function appendDebug(output: string, toolName: string, lines: string[], enabled:
   }
 
   return `${output}${section}`
+}
+
+function createDebugLogger(path: string, enabled: boolean): DebugLogger | null {
+  if (!enabled) return null
+
+  return (toolName, lines) => {
+    const timestamp = new Date().toISOString()
+    const payload = [
+      `[${timestamp}] ${toolName}`,
+      ...lines.map((line) => `- ${line}`),
+      "",
+    ].join("\n")
+
+    void appendFile(path, payload)
+  }
+}
+
+function logRepoQueryDebug(info: RepoQueryDebugInfo): void {
+  if (!debugLogger) return
+
+  const lines: string[] = [
+    `query: ${info.query}`,
+    `allowGithub: ${info.allowGithub}`,
+    `localSearchPaths: ${info.localSearchPaths.length}`,
+    `candidates: ${info.candidates.map((c) => c.key).join(", ") || "none"}`,
+    `selected: ${info.selectedTargets.map((t) => t.repoKey).join(", ") || "none"}`,
+  ]
+
+  debugLogger("repo_query", lines)
 }
 
 async function requestExternalDirectoryAccess(
@@ -637,6 +899,11 @@ export const OpencodeRepos: Plugin = async ({ client, directory }) => {
   const includeProjectParent =
     userConfig?.includeProjectParent ?? DEFAULTS.includeProjectParent
   const debugEnabled = userConfig?.debug ?? DEFAULTS.debug
+  const repoExplorerModel =
+    userConfig?.repoExplorerModel ?? DEFAULTS.repoExplorerModel
+  const debugLogPath = expandHomePath(
+    userConfig?.debugLogPath ?? DEFAULTS.debugLogPath
+  )
   const localSearchPaths = resolveSearchPaths(
     userConfig?.localSearchPaths ?? [],
     includeProjectParent,
@@ -645,11 +912,17 @@ export const OpencodeRepos: Plugin = async ({ client, directory }) => {
 
   setCacheDir(cacheDir)
 
+  if (debugEnabled) {
+    await mkdir(dirname(debugLogPath), { recursive: true })
+  }
+
+  debugLogger = createDebugLogger(debugLogPath, debugEnabled)
+
   runCleanup(cleanupMaxAgeDays)
 
   return {
     config: async (config) => {
-      const explorerAgent = createRepoExplorerAgent()
+      const explorerAgent = createRepoExplorerAgent(repoExplorerModel)
       config.agent = {
         ...config.agent,
         "repo-explorer": explorerAgent,
@@ -1607,6 +1880,7 @@ Failed to parse \`${repo}\`: ${message}`
             if (localPathResult.error) {
               let output = `## Local path error\n\n${localPathResult.error}`
               if (debugEnabled) {
+                logRepoQueryDebug(debugInfo)
                 output += `\n\n${formatRepoQueryDebug(debugInfo)}`
               }
               return output
@@ -1665,7 +1939,9 @@ Failed to parse \`${repo}\`: ${message}`
                     ctx,
                     target.repoKey,
                     resolved.repoPath,
-                    args.question
+                    args.question,
+                    repoExplorerModel,
+                    directory
                   )
 
                   await touchRepoAccess(target.repoKey)
@@ -1686,6 +1962,7 @@ Failed to parse \`${repo}\`: ${message}`
 
               if (results.length === 1) {
                 if (debugEnabled) {
+                  logRepoQueryDebug(debugInfo)
                   return `${results[0].response}\n\n${formatRepoQueryDebug(debugInfo)}`
                 }
                 return results[0].response
@@ -1697,6 +1974,7 @@ Failed to parse \`${repo}\`: ${message}`
               }
 
               if (debugEnabled) {
+                logRepoQueryDebug(debugInfo)
                 output += `${formatRepoQueryDebug(debugInfo)}\n`
               }
 
@@ -1740,6 +2018,7 @@ Provide a local path or configure search paths:
 - Or pass an explicit repo in \`repos\` (owner/repo)
 `
                 if (debugEnabled) {
+                  logRepoQueryDebug(debugInfo)
                   output += `\n${formatRepoQueryDebug(debugInfo)}`
                 }
                 return output
@@ -1752,6 +2031,7 @@ Try:
 - Using owner/repo format for exact matches
 - Running \`repo_find({ query: "${args.query}" })\` to see available options`
               if (debugEnabled) {
+                logRepoQueryDebug(debugInfo)
                 output += `\n${formatRepoQueryDebug(debugInfo)}`
               }
               return output
@@ -1770,6 +2050,7 @@ Be more specific or pass an explicit list with \`repos\`.
               }
 
               if (debugEnabled) {
+                logRepoQueryDebug(debugInfo)
                 output += `\n${formatRepoQueryDebug(debugInfo)}`
               }
 
@@ -1827,7 +2108,9 @@ Be more specific or pass an explicit list with \`repos\`.
                 ctx,
                 target.repoKey,
                 resolved.repoPath,
-                args.question
+                args.question,
+                repoExplorerModel,
+                directory
               )
 
               await touchRepoAccess(target.repoKey)
@@ -1848,6 +2131,7 @@ Be more specific or pass an explicit list with \`repos\`.
 
           if (results.length === 1) {
             if (debugEnabled) {
+              logRepoQueryDebug(debugInfo)
               return `${results[0].response}\n\n${formatRepoQueryDebug(debugInfo)}`
             }
             return results[0].response
@@ -1859,6 +2143,7 @@ Be more specific or pass an explicit list with \`repos\`.
           }
 
           if (debugEnabled) {
+            logRepoQueryDebug(debugInfo)
             output += `${formatRepoQueryDebug(debugInfo)}\n`
           }
 
@@ -1918,7 +2203,9 @@ Please check that the repository exists and you have access to it.`
               ctx,
               repoKey,
               repoPath,
-              args.question
+              args.question,
+              repoExplorerModel,
+              directory
             )
             await touchRepoAccess(repoKey)
             return appendDebug(

@@ -81,7 +81,9 @@ Create `~/.config/opencode/opencode-repos.json` to configure the plugin:
   "autoSyncOnExplore": true,
   "autoSyncIntervalHours": 24,
   "defaultBranch": "main",
-  "debug": false
+  "debug": false,
+  "repoExplorerModel": "opencode/grok-code",
+  "debugLogPath": "~/.cache/opencode-repos/debug.log"
 }
 ```
 
@@ -96,6 +98,8 @@ Create `~/.config/opencode/opencode-repos.json` to configure the plugin:
 | `autoSyncIntervalHours` | `24` | Minimum hours between auto-fetch updates |
 | `defaultBranch` | `"main"` | Default branch when none specified (some repos use "master") |
 | `debug` | `false` | Include debug details in tool responses |
+| `repoExplorerModel` | `"opencode/grok-code"` | Model used by the repo-explorer subagent |
+| `debugLogPath` | `"~/.cache/opencode-repos/debug.log"` | File path for debug logs |
 
 Cleanup runs automatically on plugin load.
 
@@ -110,9 +114,11 @@ Example permission config:
       "*": "ask",
       "/tmp/opencode-repos/*": "allow"
     }
-  }
+}
 }
 ```
+
+If you hit intermittent subagent session errors, enable debug logging and retry. The plugin includes a small retry/backoff when prompting the repo-explorer subagent.
 
 ## Tools
 

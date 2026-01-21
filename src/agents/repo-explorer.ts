@@ -1,10 +1,11 @@
 import type { AgentConfig } from "@opencode-ai/sdk"
 
-export function createRepoExplorerAgent(): AgentConfig {
+export function createRepoExplorerAgent(model?: string): AgentConfig {
   return {
     description:
       "Specialized agent for exploring external codebases. Use when you need to understand another project's architecture, APIs, patterns, or implementation details to integrate with it or learn from it.",
     mode: "subagent",
+    ...(model ? { model } : {}),
     temperature: 0.1,
     permission: {
       edit: "deny",
