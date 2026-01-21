@@ -55,6 +55,12 @@ repo_explore({
   repo: "vercel/next.js", 
   question: "How does the App Router work?" 
 })
+
+// Resolve a repo automatically and explore it
+repo_query({
+  query: "react",
+  question: "How does the reconciliation algorithm work?"
+})
 ```
 
 ## Configuration
@@ -68,10 +74,12 @@ Create `~/.config/opencode/opencode-repos.json` to configure the plugin:
     "~/personal/projects",
     "~/code"
   ],
+  "includeProjectParent": true,
   "cleanupMaxAgeDays": 30,
-  "cacheDir": "~/.cache/opencode-repos",
+  "cacheDir": "/tmp/opencode-repos",
   "useHttps": false,
   "autoSyncOnExplore": true,
+  "autoSyncIntervalHours": 24,
   "defaultBranch": "main"
 }
 ```
@@ -79,10 +87,12 @@ Create `~/.config/opencode/opencode-repos.json` to configure the plugin:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `localSearchPaths` | `[]` | Directories to scan for local git repositories |
+| `includeProjectParent` | `true` | Also search the parent of the current project directory |
 | `cleanupMaxAgeDays` | `30` | Auto-delete cached repos not accessed in this many days |
-| `cacheDir` | `~/.cache/opencode-repos` | Where to store cloned repositories |
+| `cacheDir` | `/tmp/opencode-repos` | Where to store cloned repositories |
 | `useHttps` | `false` | Use HTTPS instead of SSH for cloning (useful behind firewalls) |
 | `autoSyncOnExplore` | `true` | Auto-fetch latest before exploring a repo |
+| `autoSyncIntervalHours` | `24` | Minimum hours between auto-fetch updates |
 | `defaultBranch` | `"main"` | Default branch when none specified (some repos use "master") |
 
 Cleanup runs automatically on plugin load.
@@ -114,6 +124,34 @@ repo_find({ query: "react" })
 - **Found on GitHub** - Repos available to clone
 
 **Note:** Requires `gh` CLI for GitHub search. Configure `localSearchPaths` in config for local filesystem search.
+
+---
+
+### repo_query
+
+Resolve a repository automatically and explore it with the repo-explorer agent. If multiple repos match, it asks you to disambiguate. Accepts explicit repo lists for multi-repo questions.
+
+**Arguments:**
+- `query` (string, optional): Repository name or owner/repo format. Examples: `"next.js"`, `"vercel/next.js"`, `"react"`
+- `repos` (string[], optional): Explicit repositories to explore (`owner/repo` or `owner/repo@branch`)
+- `question` (string, required): What you want to understand about the codebase
+
+**Examples:**
+```typescript
+// Automatic resolution
+repo_query({
+  query: "react",
+  question: "How does reconciliation work?"
+})
+
+// Explicit repo list
+repo_query({
+  repos: ["acme/firmware", "acme/app"],
+  question: "Where is the BLE handshake implemented?"
+})
+```
+
+**Returns:** Exploration output from one or more repositories
 
 ---
 

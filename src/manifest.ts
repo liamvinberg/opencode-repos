@@ -23,10 +23,10 @@ export interface Config {
   localSearchPaths: string[]
 }
 
-const CACHE_DIR = join(homedir(), ".cache", "opencode-repos")
-const MANIFEST_PATH = join(CACHE_DIR, "manifest.json")
-const MANIFEST_TMP_PATH = join(CACHE_DIR, "manifest.json.tmp")
-const LOCK_PATH = join(CACHE_DIR, "manifest.lock")
+let cacheDir = join(homedir(), ".cache", "opencode-repos")
+let manifestPath = join(cacheDir, "manifest.json")
+let manifestTmpPath = join(cacheDir, "manifest.json.tmp")
+let lockPath = join(cacheDir, "manifest.lock")
 const LOCK_STALE_MS = 5 * 60 * 1000
 
 function createEmptyManifest(): Manifest {
@@ -38,7 +38,7 @@ function createEmptyManifest(): Manifest {
 }
 
 export async function loadManifest(): Promise<Manifest> {
-  const file = Bun.file(MANIFEST_PATH)
+  const file = Bun.file(manifestPath)
   const exists = await file.exists()
 
   if (!exists) {
@@ -56,14 +56,14 @@ export async function loadManifest(): Promise<Manifest> {
 }
 
 export async function saveManifest(manifest: Manifest): Promise<void> {
-  await mkdir(CACHE_DIR, { recursive: true })
-  await Bun.write(MANIFEST_TMP_PATH, JSON.stringify(manifest, null, 2))
-  await rename(MANIFEST_TMP_PATH, MANIFEST_PATH)
+  await mkdir(cacheDir, { recursive: true })
+  await Bun.write(manifestTmpPath, JSON.stringify(manifest, null, 2))
+  await rename(manifestTmpPath, manifestPath)
 }
 
 async function isLockStale(): Promise<boolean> {
   try {
-    const lockStat = await stat(LOCK_PATH)
+    const lockStat = await stat(lockPath)
     const age = Date.now() - lockStat.mtimeMs
     return age > LOCK_STALE_MS
   } catch {
@@ -76,12 +76,12 @@ async function acquireLock(): Promise<void> {
   const retryDelayMs = 100
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const lockFile = Bun.file(LOCK_PATH)
+    const lockFile = Bun.file(lockPath)
     const exists = await lockFile.exists()
 
     if (exists) {
       if (await isLockStale()) {
-        await unlink(LOCK_PATH).catch(() => {})
+        await unlink(lockPath).catch(() => {})
       } else {
         await Bun.sleep(retryDelayMs)
         continue
@@ -89,8 +89,8 @@ async function acquireLock(): Promise<void> {
     }
 
     try {
-      await mkdir(CACHE_DIR, { recursive: true })
-      await Bun.write(LOCK_PATH, String(Date.now()))
+      await mkdir(cacheDir, { recursive: true })
+      await Bun.write(lockPath, String(Date.now()))
       return
     } catch {
       await Bun.sleep(retryDelayMs)
@@ -101,7 +101,7 @@ async function acquireLock(): Promise<void> {
 }
 
 async function releaseLock(): Promise<void> {
-  await unlink(LOCK_PATH).catch(() => {})
+  await unlink(lockPath).catch(() => {})
 }
 
 export async function withManifestLock<T>(
@@ -113,4 +113,11 @@ export async function withManifestLock<T>(
   } finally {
     await releaseLock()
   }
+}
+
+export function setCacheDir(path: string): void {
+  cacheDir = path
+  manifestPath = join(cacheDir, "manifest.json")
+  manifestTmpPath = join(cacheDir, "manifest.json.tmp")
+  lockPath = join(cacheDir, "manifest.lock")
 }

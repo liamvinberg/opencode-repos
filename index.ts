@@ -7,11 +7,12 @@ import {
   loadManifest,
   saveManifest,
   withManifestLock,
+  setCacheDir,
   type RepoEntry,
 } from "./src/manifest"
 import { scanLocalRepos, matchRemoteToSpec, findLocalRepoByName } from "./src/scanner"
-import { homedir } from "node:os"
-import { join } from "node:path"
+import { homedir, tmpdir } from "node:os"
+import { dirname, join } from "node:path"
 import { existsSync } from "node:fs"
 import { rm, readFile } from "node:fs/promises"
 
@@ -21,15 +22,19 @@ interface Config {
   cacheDir?: string
   useHttps?: boolean
   autoSyncOnExplore?: boolean
+  autoSyncIntervalHours?: number
   defaultBranch?: string
+  includeProjectParent?: boolean
 }
 
 const DEFAULTS = {
   cleanupMaxAgeDays: 30,
-  cacheDir: join(homedir(), ".cache", "opencode-repos"),
+  cacheDir: join(tmpdir(), "opencode-repos"),
   useHttps: false,
   autoSyncOnExplore: true,
+  autoSyncIntervalHours: 24,
   defaultBranch: "main",
+  includeProjectParent: true,
 } as const
 
 async function loadConfig(): Promise<Config | null> {
@@ -85,15 +90,374 @@ async function runCleanup(maxAgeDays: number): Promise<void> {
   } catch {}
 }
 
-export const OpencodeRepos: Plugin = async ({ client }) => {
+function resolveSearchPaths(
+  configuredPaths: string[],
+  includeProjectParent: boolean,
+  projectDirectory?: string
+): string[] {
+  const resolved = [...configuredPaths]
+
+  if (includeProjectParent && projectDirectory) {
+    const parentDir = dirname(projectDirectory)
+    if (!resolved.includes(parentDir)) {
+      resolved.push(parentDir)
+    }
+  }
+
+  return resolved
+}
+
+function shouldSyncRepo(lastUpdated: string | undefined, intervalHours: number): boolean {
+  if (!lastUpdated) return true
+
+  const lastUpdatedMs = new Date(lastUpdated).getTime()
+  if (Number.isNaN(lastUpdatedMs)) return true
+
+  const intervalMs = intervalHours * 60 * 60 * 1000
+  return Date.now() - lastUpdatedMs >= intervalMs
+}
+
+async function registerLocalRepo(
+  repoKey: string,
+  path: string,
+  branch: string,
+  remote: string
+): Promise<void> {
+  await withManifestLock(async () => {
+    const manifest = await loadManifest()
+    if (manifest.repos[repoKey]) return
+
+    const now = new Date().toISOString()
+    manifest.repos[repoKey] = {
+      type: "local",
+      path,
+      lastAccessed: now,
+      currentBranch: branch,
+      shallow: false,
+    }
+
+    manifest.localIndex[remote] = path
+    await saveManifest(manifest)
+  })
+}
+
+async function resolveCandidates(
+  query: string,
+  searchPaths: string[],
+  manifest: Awaited<ReturnType<typeof loadManifest>>,
+  defaultBranch: string
+): Promise<{
+  candidates: RepoCandidate[]
+  exactRepoKey: string | null
+  branchOverride: string | null
+}> {
+  const trimmed = query.trim()
+  let exactRepoKey: string | null = null
+  let branchOverride: string | null = null
+
+  if (trimmed.includes("/")) {
+    try {
+      const spec = parseRepoSpec(trimmed)
+      exactRepoKey = `${spec.owner}/${spec.repo}`
+      branchOverride = spec.branch ?? null
+    } catch {
+      exactRepoKey = null
+      branchOverride = null
+    }
+  }
+
+  const queryLower = trimmed.toLowerCase()
+  const candidates: RepoCandidate[] = []
+
+  for (const [repoKey, entry] of Object.entries(manifest.repos)) {
+    if (exactRepoKey) {
+      if (repoKey.toLowerCase() !== exactRepoKey.toLowerCase()) continue
+      candidates.push({
+        key: repoKey,
+        source: "registered",
+        path: entry.path,
+        branch: entry.currentBranch,
+      })
+      continue
+    }
+
+    if (repoKey.toLowerCase().includes(queryLower)) {
+      candidates.push({
+        key: repoKey,
+        source: "registered",
+        path: entry.path,
+        branch: entry.currentBranch,
+      })
+    }
+  }
+
+  if (searchPaths.length > 0) {
+    try {
+      const localResults = await findLocalRepoByName(searchPaths, trimmed)
+      for (const local of localResults) {
+        if (exactRepoKey && local.spec.toLowerCase() !== exactRepoKey.toLowerCase()) {
+          continue
+        }
+
+        candidates.push({
+          key: local.spec,
+          source: "local",
+          path: local.path,
+          branch: local.branch || defaultBranch,
+          remote: local.remote,
+        })
+      }
+    } catch {}
+  }
+
+  try {
+    if (exactRepoKey) {
+      const repoCheck =
+        await $`gh repo view ${exactRepoKey} --json nameWithOwner,description,url 2>/dev/null`.text()
+      const repo = JSON.parse(repoCheck)
+      candidates.push({
+        key: repo.nameWithOwner,
+        source: "github",
+        description: repo.description || "",
+        url: repo.url,
+        branch: branchOverride ?? defaultBranch,
+      })
+    } else {
+      const searchResult =
+        await $`gh search repos ${trimmed} --limit 5 --json fullName,description,url 2>/dev/null`.text()
+      const repos = JSON.parse(searchResult)
+      for (const repo of repos) {
+        candidates.push({
+          key: repo.fullName,
+          source: "github",
+          description: repo.description || "",
+          url: repo.url,
+          branch: defaultBranch,
+        })
+      }
+    }
+  } catch {}
+
+  return {
+    candidates: uniqueCandidates(candidates),
+    exactRepoKey,
+    branchOverride,
+  }
+}
+
+async function ensureRepoAvailable(
+  repoKey: string,
+  branch: string,
+  cacheDir: string,
+  useHttps: boolean,
+  autoSyncOnExplore: boolean,
+  autoSyncIntervalHours: number
+): Promise<{
+  repoPath: string
+  branch: string
+  type: "cached" | "local"
+}> {
+  let manifest = await loadManifest()
+  const entry = manifest.repos[repoKey]
+
+  if (!entry) {
+    const [owner, repo] = repoKey.split("/")
+    const repoPath = join(cacheDir, owner, repo)
+    const url = buildGitUrl(owner, repo, useHttps)
+
+    await withManifestLock(async () => {
+      await cloneRepo(url, repoPath, { branch })
+
+      const now = new Date().toISOString()
+      const updatedManifest = await loadManifest()
+      updatedManifest.repos[repoKey] = {
+        type: "cached",
+        path: repoPath,
+        clonedAt: now,
+        lastAccessed: now,
+        lastUpdated: now,
+        currentBranch: branch,
+        shallow: true,
+      }
+      await saveManifest(updatedManifest)
+    })
+
+    return {
+      repoPath,
+      branch,
+      type: "cached",
+    }
+  }
+
+  const repoPath = entry.path
+
+  if (entry.type === "cached") {
+    if (entry.currentBranch !== branch) {
+      await switchBranch(repoPath, branch)
+      await withManifestLock(async () => {
+        const updatedManifest = await loadManifest()
+        if (updatedManifest.repos[repoKey]) {
+          updatedManifest.repos[repoKey].currentBranch = branch
+          updatedManifest.repos[repoKey].lastUpdated = new Date().toISOString()
+          await saveManifest(updatedManifest)
+        }
+      })
+    } else if (autoSyncOnExplore && shouldSyncRepo(entry.lastUpdated, autoSyncIntervalHours)) {
+      await updateRepo(repoPath)
+      await withManifestLock(async () => {
+        const updatedManifest = await loadManifest()
+        if (updatedManifest.repos[repoKey]) {
+          updatedManifest.repos[repoKey].lastUpdated = new Date().toISOString()
+          await saveManifest(updatedManifest)
+        }
+      })
+    }
+  }
+
+  return {
+    repoPath,
+    branch,
+    type: entry.type,
+  }
+}
+
+async function runRepoExplorer(
+  client: RepoClient,
+  ctx: RepoToolContext,
+  repoKey: string,
+  repoPath: string,
+  question: string
+): Promise<string> {
+  const createResult = await client.session.create({
+    body: {
+      parentID: ctx.sessionID,
+      title: `Repo explorer: ${repoKey}`,
+    },
+    query: {
+      directory: repoPath,
+    },
+  })
+
+  const sessionID = createResult.data?.id
+  if (!sessionID) {
+    return `## Exploration failed
+
+Failed to create a subagent session for ${repoKey}.`
+  }
+
+  const explorationPrompt = `Index the codebase and answer the following question:
+
+${question}
+
+Working directory: ${repoPath}
+
+You have access to all standard code exploration tools:
+- read: Read files
+- glob: Find files by pattern
+- grep: Search for patterns
+- bash: Run git commands if needed
+
+Remember to:
+- Start with high-level structure (README, package.json, main files)
+- Cite specific files and line numbers
+- Include relevant code snippets
+- Explain how components interact
+`
+
+  const response = await client.session.prompt({
+    path: { id: sessionID },
+    body: {
+      agent: "repo-explorer",
+      parts: [{ type: "text", text: explorationPrompt }],
+    },
+  })
+
+  if (response.error) {
+    return `## Exploration failed
+
+Error from API: ${JSON.stringify(response.error)}`
+  }
+
+  const parts = response.data?.parts || []
+  const textParts = parts.filter((part) => part.type === "text")
+  const texts = textParts
+    .map((part) => ("text" in part ? part.text : ""))
+    .filter(Boolean)
+
+  return texts.join("\n\n") || "No response from exploration agent."
+}
+
+interface RepoToolContext {
+  sessionID: string
+}
+
+interface RepoClient {
+  session: {
+    create: (input: {
+      body: { parentID?: string; title?: string }
+      query?: { directory?: string }
+    }) => Promise<{ data?: { id?: string } }>
+    prompt: (input: {
+      path: { id: string }
+      body: { agent: string; parts: Array<{ type: "text"; text: string }> }
+    }) => Promise<{
+      error?: unknown
+      data?: { parts?: Array<{ type: string; text?: string }> }
+    }>
+  }
+}
+
+type RepoSource = "registered" | "local" | "github"
+
+interface RepoCandidate {
+  key: string
+  source: RepoSource
+  path?: string
+  branch?: string
+  description?: string
+  url?: string
+  remote?: string
+}
+
+function uniqueCandidates(candidates: RepoCandidate[]): RepoCandidate[] {
+  const map = new Map<string, RepoCandidate>()
+  for (const candidate of candidates) {
+    if (!map.has(candidate.key)) {
+      map.set(candidate.key, candidate)
+    }
+  }
+  return Array.from(map.values())
+}
+
+async function touchRepoAccess(repoKey: string): Promise<void> {
+  await withManifestLock(async () => {
+    const updatedManifest = await loadManifest()
+    if (updatedManifest.repos[repoKey]) {
+      updatedManifest.repos[repoKey].lastAccessed = new Date().toISOString()
+      await saveManifest(updatedManifest)
+    }
+  })
+}
+
+export const OpencodeRepos: Plugin = async ({ client, directory }) => {
   const userConfig = await loadConfig()
 
   const cacheDir = userConfig?.cacheDir ?? DEFAULTS.cacheDir
   const useHttps = userConfig?.useHttps ?? DEFAULTS.useHttps
   const autoSyncOnExplore = userConfig?.autoSyncOnExplore ?? DEFAULTS.autoSyncOnExplore
+  const autoSyncIntervalHours =
+    userConfig?.autoSyncIntervalHours ?? DEFAULTS.autoSyncIntervalHours
   const defaultBranch = userConfig?.defaultBranch ?? DEFAULTS.defaultBranch
   const cleanupMaxAgeDays = userConfig?.cleanupMaxAgeDays ?? DEFAULTS.cleanupMaxAgeDays
-  const localSearchPaths = userConfig?.localSearchPaths ?? []
+  const includeProjectParent =
+    userConfig?.includeProjectParent ?? DEFAULTS.includeProjectParent
+  const localSearchPaths = resolveSearchPaths(
+    userConfig?.localSearchPaths ?? [],
+    includeProjectParent,
+    directory
+  )
+
+  setCacheDir(cacheDir)
 
   runCleanup(cleanupMaxAgeDays)
 
@@ -769,6 +1133,164 @@ The repository has been unregistered from the manifest. You may need to manually
         },
       }),
 
+      repo_query: tool({
+        description:
+          "Resolve a repository automatically and explore it with a subagent. Picks an exact match when possible, otherwise asks you to disambiguate. Can run multiple repos when specified.",
+        args: {
+          query: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "Repository name or owner/repo format. Examples: 'next.js', 'vercel/next.js', 'react'"
+            ),
+          repos: tool.schema
+            .array(tool.schema.string())
+            .optional()
+            .describe("Explicit repositories to explore (owner/repo or owner/repo@branch)"),
+          question: tool.schema
+            .string()
+            .describe("What you want to understand about the codebase"),
+        },
+        async execute(args, ctx) {
+          const explicitRepos = args.repos?.filter(Boolean) ?? []
+
+          if (explicitRepos.length === 0 && !args.query) {
+            return `## Missing repository query
+
+Provide either \`query\` or a non-empty \`repos\` list.`
+          }
+
+          const targets: Array<{
+            repoKey: string
+            branch: string
+            source?: RepoSource
+            remote?: string
+            path?: string
+          }> = []
+
+          if (explicitRepos.length > 0) {
+            for (const repo of explicitRepos) {
+              try {
+                const spec = parseRepoSpec(repo)
+                targets.push({
+                  repoKey: `${spec.owner}/${spec.repo}`,
+                  branch: spec.branch || defaultBranch,
+                })
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : String(error)
+                return `## Invalid repository
+
+Failed to parse \`${repo}\`: ${message}`
+              }
+            }
+          } else {
+            const manifest = await loadManifest()
+            const { candidates, exactRepoKey, branchOverride } = await resolveCandidates(
+              args.query!,
+              localSearchPaths,
+              manifest,
+              defaultBranch
+            )
+
+            if (candidates.length === 0) {
+              return `## No repositories found
+
+No repositories matched \`${args.query}\`.
+
+Try:
+- Using owner/repo format for exact matches
+- Running \`repo_find({ query: "${args.query}" })\` to see available options`
+            }
+
+            if (candidates.length > 1 && !exactRepoKey) {
+              let output = `## Multiple repositories matched "${args.query}"
+
+Be more specific or pass an explicit list with \`repos\`.
+
+`
+              for (const candidate of candidates) {
+                const sourceLabel = candidate.source === "registered" ? "registered" : candidate.source
+                const description = candidate.description ? ` - ${candidate.description.slice(0, 80)}` : ""
+                output += `- ${candidate.key} (${sourceLabel})${description}\n`
+              }
+
+              return output
+            }
+
+            const selected = candidates[0]
+            const branch = branchOverride ?? selected.branch ?? defaultBranch
+
+            targets.push({
+              repoKey: selected.key,
+              branch,
+              source: selected.source,
+              remote: selected.remote,
+              path: selected.path,
+            })
+          }
+
+          for (const target of targets) {
+            if (target.source === "local" && target.remote && target.path) {
+              await registerLocalRepo(
+                target.repoKey,
+                target.path,
+                target.branch,
+                target.remote
+              )
+            }
+          }
+
+          const results = await Promise.all(
+            targets.map(async (target) => {
+              try {
+                const resolved = await ensureRepoAvailable(
+                  target.repoKey,
+                  target.branch,
+                  cacheDir,
+                  useHttps,
+                  autoSyncOnExplore,
+                  autoSyncIntervalHours
+                )
+
+                const response = await runRepoExplorer(
+                  client as RepoClient,
+                  ctx,
+                  target.repoKey,
+                  resolved.repoPath,
+                  args.question
+                )
+
+                await touchRepoAccess(target.repoKey)
+
+                return {
+                  repoKey: target.repoKey,
+                  response,
+                }
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : String(error)
+                return {
+                  repoKey: target.repoKey,
+                  response: `## Exploration failed\n\n${message}`,
+                }
+              }
+            })
+          )
+
+          if (results.length === 1) {
+            return results[0].response
+          }
+
+          let output = "## Repository Exploration Results\n\n"
+          for (const result of results) {
+            output += `### ${result.repoKey}\n\n${result.response}\n\n`
+          }
+
+          return output
+        },
+      }),
+
       repo_explore: tool({
         description:
           "Explore a repository to understand its codebase. Spawns a specialized exploration agent that analyzes the repo and answers your question. The agent will read source files, trace code paths, and explain architecture.",
@@ -786,110 +1308,38 @@ The repository has been unregistered from the manifest. You may need to manually
           const spec = parseRepoSpec(args.repo)
           const branch = spec.branch || defaultBranch
           const repoKey = `${spec.owner}/${spec.repo}`
-
-          let manifest = await loadManifest()
           let repoPath: string
 
-          if (!manifest.repos[repoKey]) {
-            try {
-              repoPath = join(cacheDir, spec.owner, spec.repo)
-              const url = buildGitUrl(spec.owner, spec.repo, useHttps)
+          try {
+            const resolved = await ensureRepoAvailable(
+              repoKey,
+              branch,
+              cacheDir,
+              useHttps,
+              autoSyncOnExplore,
+              autoSyncIntervalHours
+            )
+            repoPath = resolved.repoPath
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error)
+            return `## Failed to prepare repository
 
-              await withManifestLock(async () => {
-                await cloneRepo(url, repoPath, { branch })
-
-                const now = new Date().toISOString()
-                const updatedManifest = await loadManifest()
-                updatedManifest.repos[repoKey] = {
-                  type: "cached",
-                  path: repoPath,
-                  clonedAt: now,
-                  lastAccessed: now,
-                  lastUpdated: now,
-                  currentBranch: branch,
-                  shallow: true,
-                }
-                await saveManifest(updatedManifest)
-              })
-            } catch (error) {
-              const message =
-                error instanceof Error ? error.message : String(error)
-              return `## Failed to clone repository
-
-Failed to clone ${args.repo}: ${message}
+Failed to prepare ${args.repo}: ${message}
 
 Please check that the repository exists and you have access to it.`
-            }
-          } else {
-            const entry = manifest.repos[repoKey]
-            repoPath = entry.path
-
-            if (entry.type === "cached" && autoSyncOnExplore) {
-              try {
-                if (entry.currentBranch !== branch) {
-                  await switchBranch(repoPath, branch)
-                } else {
-                  await updateRepo(repoPath)
-                }
-                await withManifestLock(async () => {
-                  const updatedManifest = await loadManifest()
-                  if (updatedManifest.repos[repoKey]) {
-                    updatedManifest.repos[repoKey].currentBranch = branch
-                    updatedManifest.repos[repoKey].lastUpdated = new Date().toISOString()
-                    await saveManifest(updatedManifest)
-                  }
-                })
-              } catch {}
-            }
           }
 
-          const explorationPrompt = `Explore the codebase at ${repoPath} and answer the following question:
-
-${args.question}
-
-Working directory: ${repoPath}
-
-You have access to all standard code exploration tools:
-- read: Read files
-- glob: Find files by pattern
-- grep: Search for patterns
-- bash: Run git commands if needed
-
-Remember to:
-- Start with high-level structure (README, package.json, main files)
-- Cite specific files and line numbers
-- Include relevant code snippets
-- Explain how components interact
-`
-
           try {
-            const response = await client.session.prompt({
-              path: { id: ctx.sessionID },
-              body: {
-                agent: "repo-explorer",
-                parts: [{ type: "text", text: explorationPrompt }],
-              },
-            })
-
-            await withManifestLock(async () => {
-              const updatedManifest = await loadManifest()
-              if (updatedManifest.repos[repoKey]) {
-                updatedManifest.repos[repoKey].lastAccessed =
-                  new Date().toISOString()
-                await saveManifest(updatedManifest)
-              }
-            })
-
-            if (response.error) {
-              return `## Exploration failed
-
-Error from API: ${JSON.stringify(response.error)}`
-            }
-
-            const parts = response.data?.parts || []
-            const textParts = parts.filter(p => p.type === "text")
-            const texts = textParts.map(p => "text" in p ? p.text : "").filter(Boolean)
-            return texts.join("\n\n") || "No response from exploration agent."
+            const response = await runRepoExplorer(
+              client as RepoClient,
+              ctx,
+              repoKey,
+              repoPath,
+              args.question
+            )
+            await touchRepoAccess(repoKey)
+            return response
           } catch (error) {
             const message =
               error instanceof Error ? error.message : String(error)
