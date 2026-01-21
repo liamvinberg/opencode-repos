@@ -80,7 +80,8 @@ Create `~/.config/opencode/opencode-repos.json` to configure the plugin:
   "useHttps": false,
   "autoSyncOnExplore": true,
   "autoSyncIntervalHours": 24,
-  "defaultBranch": "main"
+  "defaultBranch": "main",
+  "debug": false
 }
 ```
 
@@ -94,8 +95,24 @@ Create `~/.config/opencode/opencode-repos.json` to configure the plugin:
 | `autoSyncOnExplore` | `true` | Auto-fetch latest before exploring a repo |
 | `autoSyncIntervalHours` | `24` | Minimum hours between auto-fetch updates |
 | `defaultBranch` | `"main"` | Default branch when none specified (some repos use "master") |
+| `debug` | `false` | Include debug details in tool responses |
 
 Cleanup runs automatically on plugin load.
+
+To avoid repeated prompts when exploring external repos, update your OpenCode permissions (`~/.config/opencode/opencode.jsonc`) to allow external directories as needed.
+
+Example permission config:
+
+```json
+{
+  "permission": {
+    "external_directory": {
+      "*": "ask",
+      "/tmp/opencode-repos/*": "allow"
+    }
+  }
+}
+```
 
 ## Tools
 
@@ -132,7 +149,7 @@ repo_find({ query: "react" })
 Resolve a repository automatically and explore it with the repo-explorer agent. If multiple repos match, it asks you to disambiguate. Accepts explicit repo lists for multi-repo questions.
 
 **Arguments:**
-- `query` (string, optional): Repository name or owner/repo format. Examples: `"next.js"`, `"vercel/next.js"`, `"react"`
+- `query` (string, optional): Repository name, owner/repo, or absolute local path. Examples: `"next.js"`, `"vercel/next.js"`, `"/Users/me/projects/app"`
 - `repos` (string[], optional): Explicit repositories to explore (`owner/repo` or `owner/repo@branch`)
 - `question` (string, required): What you want to understand about the codebase
 
@@ -142,6 +159,12 @@ Resolve a repository automatically and explore it with the repo-explorer agent. 
 repo_query({
   query: "react",
   question: "How does reconciliation work?"
+})
+
+// Absolute local path
+repo_query({
+  query: "/Users/me/projects/firmware",
+  question: "Where is the BLE handshake implemented?"
 })
 
 // Explicit repo list

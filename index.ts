@@ -12,7 +12,7 @@ import {
 } from "./src/manifest"
 import { scanLocalRepos, matchRemoteToSpec, findLocalRepoByName } from "./src/scanner"
 import { homedir, tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, isAbsolute, join } from "node:path"
 import { existsSync } from "node:fs"
 import { rm, readFile } from "node:fs/promises"
 
@@ -25,6 +25,7 @@ interface Config {
   autoSyncIntervalHours?: number
   defaultBranch?: string
   includeProjectParent?: boolean
+  debug?: boolean
 }
 
 const DEFAULTS = {
@@ -35,6 +36,7 @@ const DEFAULTS = {
   autoSyncIntervalHours: 24,
   defaultBranch: "main",
   includeProjectParent: true,
+  debug: false,
 } as const
 
 async function loadConfig(): Promise<Config | null> {
@@ -115,6 +117,71 @@ function shouldSyncRepo(lastUpdated: string | undefined, intervalHours: number):
 
   const intervalMs = intervalHours * 60 * 60 * 1000
   return Date.now() - lastUpdatedMs >= intervalMs
+}
+
+function expandHomePath(input: string): string {
+  if (input.startsWith("~/")) {
+    return join(homedir(), input.slice(2))
+  }
+
+  return input
+}
+
+async function resolveLocalPathQuery(
+  query: string,
+  defaultBranch: string
+): Promise<{ candidate: RepoCandidate | null; error?: string }> {
+  const expanded = expandHomePath(query.trim())
+
+  if (!isAbsolute(expanded)) {
+    return { candidate: null }
+  }
+
+  if (!existsSync(expanded)) {
+    return { candidate: null, error: `Path does not exist: ${expanded}` }
+  }
+
+  if (!existsSync(join(expanded, ".git"))) {
+    return { candidate: null, error: `No .git directory found at: ${expanded}` }
+  }
+
+  try {
+    const [remote, branch] = await Promise.all([
+      $`git -C ${expanded} remote get-url origin`.text(),
+      $`git -C ${expanded} branch --show-current`.text(),
+    ])
+
+    if (!remote.trim()) {
+      return {
+        candidate: null,
+        error: "Local repository has no origin remote. Add one to use repo_query.",
+      }
+    }
+
+    const spec = matchRemoteToSpec(remote.trim())
+    if (!spec) {
+      return {
+        candidate: null,
+        error: "Origin remote is not a supported GitHub URL.",
+      }
+    }
+
+    return {
+      candidate: {
+        key: spec,
+        source: "local",
+        path: expanded,
+        branch: branch.trim() || defaultBranch,
+        remote: remote.trim(),
+      },
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return {
+      candidate: null,
+      error: `Failed to read local repository metadata: ${message}`,
+    }
+  }
 }
 
 async function registerLocalRepo(
@@ -268,22 +335,27 @@ async function ensureRepoAvailable(
     const repoPath = join(cacheDir, owner, repo)
     const url = buildGitUrl(owner, repo, useHttps)
 
-    await withManifestLock(async () => {
-      await cloneRepo(url, repoPath, { branch })
+    try {
+      await withManifestLock(async () => {
+        await cloneRepo(url, repoPath, { branch })
 
-      const now = new Date().toISOString()
-      const updatedManifest = await loadManifest()
-      updatedManifest.repos[repoKey] = {
-        type: "cached",
-        path: repoPath,
-        clonedAt: now,
-        lastAccessed: now,
-        lastUpdated: now,
-        currentBranch: branch,
-        shallow: true,
-      }
-      await saveManifest(updatedManifest)
-    })
+        const now = new Date().toISOString()
+        const updatedManifest = await loadManifest()
+        updatedManifest.repos[repoKey] = {
+          type: "cached",
+          path: repoPath,
+          clonedAt: now,
+          lastAccessed: now,
+          lastUpdated: now,
+          currentBranch: branch,
+          shallow: true,
+        }
+        await saveManifest(updatedManifest)
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`Clone failed for ${repoKey}@${branch}: ${message}`)
+    }
 
     return {
       repoPath,
@@ -295,25 +367,30 @@ async function ensureRepoAvailable(
   const repoPath = entry.path
 
   if (entry.type === "cached") {
-    if (entry.currentBranch !== branch) {
-      await switchBranch(repoPath, branch)
-      await withManifestLock(async () => {
-        const updatedManifest = await loadManifest()
-        if (updatedManifest.repos[repoKey]) {
-          updatedManifest.repos[repoKey].currentBranch = branch
-          updatedManifest.repos[repoKey].lastUpdated = new Date().toISOString()
-          await saveManifest(updatedManifest)
-        }
-      })
-    } else if (autoSyncOnExplore && shouldSyncRepo(entry.lastUpdated, autoSyncIntervalHours)) {
-      await updateRepo(repoPath)
-      await withManifestLock(async () => {
-        const updatedManifest = await loadManifest()
-        if (updatedManifest.repos[repoKey]) {
-          updatedManifest.repos[repoKey].lastUpdated = new Date().toISOString()
-          await saveManifest(updatedManifest)
-        }
-      })
+    try {
+      if (entry.currentBranch !== branch) {
+        await switchBranch(repoPath, branch)
+        await withManifestLock(async () => {
+          const updatedManifest = await loadManifest()
+          if (updatedManifest.repos[repoKey]) {
+            updatedManifest.repos[repoKey].currentBranch = branch
+            updatedManifest.repos[repoKey].lastUpdated = new Date().toISOString()
+            await saveManifest(updatedManifest)
+          }
+        })
+      } else if (autoSyncOnExplore && shouldSyncRepo(entry.lastUpdated, autoSyncIntervalHours)) {
+        await updateRepo(repoPath)
+        await withManifestLock(async () => {
+          const updatedManifest = await loadManifest()
+          if (updatedManifest.repos[repoKey]) {
+            updatedManifest.repos[repoKey].lastUpdated = new Date().toISOString()
+            await saveManifest(updatedManifest)
+          }
+        })
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`Update failed for ${repoKey}@${branch}: ${message}`)
     }
   }
 
@@ -331,21 +408,37 @@ async function runRepoExplorer(
   repoPath: string,
   question: string
 ): Promise<string> {
-  const createResult = await client.session.create({
-    body: {
-      parentID: ctx.sessionID,
-      title: `Repo explorer: ${repoKey}`,
-    },
-    query: {
-      directory: repoPath,
-    },
-  })
+  let sessionID: string | undefined
 
-  const sessionID = createResult.data?.id
+  try {
+    const createResult = await client.session.create({
+      body: {
+        parentID: ctx.sessionID,
+        title: `Repo explorer: ${repoKey}`,
+      },
+      query: {
+        directory: repoPath,
+      },
+    })
+
+    sessionID = createResult.data?.id
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return `## Exploration failed
+
+Repository: ${repoKey}
+Path: ${repoPath}
+
+Failed to create a subagent session: ${message}`
+  }
+
   if (!sessionID) {
     return `## Exploration failed
 
-Failed to create a subagent session for ${repoKey}.`
+Repository: ${repoKey}
+Path: ${repoPath}
+
+Failed to create a subagent session (no session ID returned).`
   }
 
   const explorationPrompt = `Index the codebase and answer the following question:
@@ -367,16 +460,33 @@ Remember to:
 - Explain how components interact
 `
 
-  const response = await client.session.prompt({
-    path: { id: sessionID },
-    body: {
-      agent: "repo-explorer",
-      parts: [{ type: "text", text: explorationPrompt }],
-    },
-  })
+  let response: Awaited<ReturnType<RepoClient["session"]["prompt"]>>
+
+  try {
+    response = await client.session.prompt({
+      path: { id: sessionID },
+      body: {
+        agent: "repo-explorer",
+        parts: [{ type: "text", text: explorationPrompt }],
+      },
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return `## Exploration failed
+
+Repository: ${repoKey}
+Session: ${sessionID}
+Path: ${repoPath}
+
+Failed to run exploration agent: ${message}`
+  }
 
   if (response.error) {
     return `## Exploration failed
+
+Repository: ${repoKey}
+Session: ${sessionID}
+Path: ${repoPath}
 
 Error from API: ${JSON.stringify(response.error)}`
   }
@@ -392,6 +502,15 @@ Error from API: ${JSON.stringify(response.error)}`
 
 interface RepoToolContext {
   sessionID: string
+}
+
+interface PermissionContext {
+  ask: (input: {
+    permission: "external_directory"
+    patterns: string[]
+    always: string[]
+    metadata: Record<string, string>
+  }) => Promise<void>
 }
 
 interface RepoClient {
@@ -422,6 +541,14 @@ interface RepoCandidate {
   remote?: string
 }
 
+interface RepoQueryDebugInfo {
+  query: string
+  allowGithub: boolean
+  localSearchPaths: string[]
+  candidates: RepoCandidate[]
+  selectedTargets: Array<{ repoKey: string; branch: string }>
+}
+
 function uniqueCandidates(candidates: RepoCandidate[]): RepoCandidate[] {
   const map = new Map<string, RepoCandidate>()
   for (const candidate of candidates) {
@@ -442,6 +569,61 @@ async function touchRepoAccess(repoKey: string): Promise<void> {
   })
 }
 
+function formatRepoQueryDebug(info: RepoQueryDebugInfo): string {
+  let output = "## Debug\n\n"
+  output += `Query: ${info.query}\n`
+  output += `GitHub search enabled: ${info.allowGithub}\n`
+  output += `Local search paths: ${info.localSearchPaths.length}\n`
+  for (const path of info.localSearchPaths) {
+    output += `- ${path}\n`
+  }
+  output += "\nCandidates:\n"
+  if (info.candidates.length === 0) {
+    output += "- none\n"
+  } else {
+    for (const candidate of info.candidates) {
+      output += `- ${candidate.key} (${candidate.source})\n`
+    }
+  }
+  output += "\nSelected targets:\n"
+  if (info.selectedTargets.length === 0) {
+    output += "- none\n"
+  } else {
+    for (const target of info.selectedTargets) {
+      output += `- ${target.repoKey} @ ${target.branch}\n`
+    }
+  }
+  return output
+}
+
+function appendDebug(output: string, toolName: string, lines: string[], enabled: boolean): string {
+  if (!enabled) return output
+
+  let section = `\n\n## Debug\n\nTool: ${toolName}\n`
+  for (const line of lines) {
+    section += `- ${line}\n`
+  }
+
+  return `${output}${section}`
+}
+
+async function requestExternalDirectoryAccess(
+  ctx: PermissionContext,
+  targetPath: string
+): Promise<void> {
+  const parentDir = dirname(targetPath)
+  const glob = join(parentDir, "*")
+  await ctx.ask({
+    permission: "external_directory",
+    patterns: [glob],
+    always: [glob],
+    metadata: {
+      filepath: targetPath,
+      parentDir,
+    },
+  })
+}
+
 export const OpencodeRepos: Plugin = async ({ client, directory }) => {
   const userConfig = await loadConfig()
 
@@ -454,6 +636,7 @@ export const OpencodeRepos: Plugin = async ({ client, directory }) => {
   const cleanupMaxAgeDays = userConfig?.cleanupMaxAgeDays ?? DEFAULTS.cleanupMaxAgeDays
   const includeProjectParent =
     userConfig?.includeProjectParent ?? DEFAULTS.includeProjectParent
+  const debugEnabled = userConfig?.debug ?? DEFAULTS.debug
   const localSearchPaths = resolveSearchPaths(
     userConfig?.localSearchPaths ?? [],
     includeProjectParent,
@@ -566,7 +749,7 @@ When user mentions another project or asks about external code:
             ? "Repository already cached"
             : "Successfully cloned repository"
 
-          return `## ${statusText}
+          let output = `## ${statusText}
 
 **Repository**: ${repoKey}
 **Branch**: ${result.branch}
@@ -574,6 +757,22 @@ When user mentions another project or asks about external code:
 **Status**: ${result.status}
 
 You can now use \`repo_read\` to access files from this repository.`
+
+          output = appendDebug(
+            output,
+            "repo_clone",
+            [
+              `repoKey: ${repoKey}`,
+              `branch: ${result.branch}`,
+              `path: ${result.path}`,
+              `cacheDir: ${cacheDir}`,
+              `useHttps: ${useHttps}`,
+              `force: ${args.force}`,
+            ],
+            debugEnabled
+          )
+
+          return output
         },
       }),
 
@@ -604,11 +803,18 @@ You can now use \`repo_read\` to access files from this repository.`
           const entry = manifest.repos[repoKey]
 
           if (!entry) {
-            return `## Repository not found
+            let output = `## Repository not found
 
 Repository \`${spec.owner}/${spec.repo}\` is not registered.
 
 Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
+            output = appendDebug(
+              output,
+              "repo_read",
+              [`repoKey: ${repoKey}`, `branch: ${branch}`],
+              debugEnabled
+            )
+            return output
           }
 
           if (entry.type === "cached" && entry.currentBranch !== branch) {
@@ -636,7 +842,13 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
           }
 
           if (filePaths.length === 0) {
-            return `No files found matching path: ${args.path}`
+            const output = appendDebug(
+              `No files found matching path: ${args.path}`,
+              "repo_read",
+              [`repoKey: ${repoKey}`, `branch: ${branch}`],
+              debugEnabled
+            )
+            return output
           }
 
           let output = `## Files from ${repoKey} @ ${branch}\n\n`
@@ -674,6 +886,17 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
             }
           })
 
+          output = appendDebug(
+            output,
+            "repo_read",
+            [
+              `repoKey: ${repoKey}`,
+              `branch: ${branch}`,
+              `files: ${filePaths.length}`,
+            ],
+            debugEnabled
+          )
+
           return output
         },
       }),
@@ -698,7 +921,12 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
           })
 
           if (filteredRepos.length === 0) {
-            return "No repositories registered."
+            return appendDebug(
+              "No repositories registered.",
+              "repo_list",
+              [`type: ${args.type}`],
+              debugEnabled
+            )
           }
 
           let output = "## Registered Repositories\n\n"
@@ -729,7 +957,12 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
           ).length
           output += `\nTotal: ${filteredRepos.length} repos (${cachedCount} cached, ${localCount} local)`
 
-          return output
+          return appendDebug(
+            output,
+            "repo_list",
+            [`type: ${args.type}`, `total: ${filteredRepos.length}`],
+            debugEnabled
+          )
         },
       }),
 
@@ -746,7 +979,7 @@ Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
           const searchPaths = args.paths ?? (localSearchPaths.length > 0 ? localSearchPaths : null)
 
           if (!searchPaths || searchPaths.length === 0) {
-            return `## No search paths configured
+            let output = `## No search paths configured
 
 Create a config file at \`~/.config/opencode/opencode-repos.json\`:
 
@@ -761,17 +994,31 @@ Create a config file at \`~/.config/opencode/opencode-repos.json\`:
 \`\`\`
 
 Or provide paths directly: \`repo_scan({ paths: ["~/projects"] })\``
+            output = appendDebug(
+              output,
+              "repo_scan",
+              ["searchPaths: none"],
+              debugEnabled
+            )
+            return output
           }
 
           const foundRepos = await scanLocalRepos(searchPaths)
 
           if (foundRepos.length === 0) {
-            return `## No repositories found
+            let output = `## No repositories found
 
 Searched ${searchPaths.length} path(s):
 ${searchPaths.map((p) => `- ${p}`).join("\n")}
 
 No git repositories with remotes were found.`
+            output = appendDebug(
+              output,
+              "repo_scan",
+              [`searchPaths: ${searchPaths.length}`],
+              debugEnabled
+            )
+            return output
           }
 
           let newCount = 0
@@ -809,13 +1056,24 @@ No git repositories with remotes were found.`
             await saveManifest(manifest)
           })
 
-          return `## Local Repository Scan Complete
+          let output = `## Local Repository Scan Complete
 
 **Found**: ${foundRepos.length} repositories in ${searchPaths.length} path(s)
 **New**: ${newCount} repos registered
 **Existing**: ${existingCount} repos already registered
 
 ${newCount > 0 ? "Use `repo_list()` to see all registered repositories." : ""}`
+          output = appendDebug(
+            output,
+            "repo_scan",
+            [
+              `searchPaths: ${searchPaths.length}`,
+              `found: ${foundRepos.length}`,
+              `new: ${newCount}`,
+            ],
+            debugEnabled
+          )
+          return output
         },
       }),
 
@@ -838,11 +1096,18 @@ ${newCount > 0 ? "Use `repo_list()` to see all registered repositories." : ""}`
           const entry = manifest.repos[repoKey]
 
           if (!entry) {
-            return `## Repository not found
+            let output = `## Repository not found
 
 Repository \`${repoKey}\` is not registered.
 
 Use \`repo_clone({ repo: "${args.repo}" })\` to clone it first.`
+            output = appendDebug(
+              output,
+              "repo_update",
+              [`repoKey: ${repoKey}`],
+              debugEnabled
+            )
+            return output
           }
 
           if (entry.type === "local") {
@@ -861,9 +1126,16 @@ ${status || "Working tree clean"}
 \`\`\``
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error)
-              return `## Error getting status
+              let output = `## Error getting status
 
 Failed to get git status for ${repoKey}: ${message}`
+              output = appendDebug(
+                output,
+                "repo_update",
+                [`repoKey: ${repoKey}`, `path: ${entry.path}`],
+                debugEnabled
+              )
+              return output
             }
           }
 
@@ -888,7 +1160,7 @@ Failed to get git status for ${repoKey}: ${message}`
               }
             })
 
-            return `## Repository Updated
+            let output = `## Repository Updated
 
 **Repository**: ${repoKey}
 **Path**: ${entry.path}
@@ -896,13 +1168,27 @@ Failed to get git status for ${repoKey}: ${message}`
 **Latest Commit**: ${info.commit.substring(0, 7)}
 
 Repository has been updated to the latest commit.`
+            output = appendDebug(
+              output,
+              "repo_update",
+              [`repoKey: ${repoKey}`, `branch: ${targetBranch}`],
+              debugEnabled
+            )
+            return output
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
-            return `## Update Failed
+            let output = `## Update Failed
 
 Failed to update ${repoKey}: ${message}
 
 The repository may be corrupted. Try \`repo_clone({ repo: "${args.repo}", force: true })\` to re-clone.`
+            output = appendDebug(
+              output,
+              "repo_update",
+              [`repoKey: ${repoKey}`],
+              debugEnabled
+            )
+            return output
           }
         },
       }),
@@ -930,11 +1216,18 @@ The repository may be corrupted. Try \`repo_clone({ repo: "${args.repo}", force:
           const entry = manifest.repos[repoKey]
 
           if (!entry) {
-            return `## Repository not found
+            let output = `## Repository not found
 
 Repository \`${repoKey}\` is not registered.
 
 Use \`repo_list()\` to see all registered repositories.`
+            output = appendDebug(
+              output,
+              "repo_remove",
+              [`repoKey: ${repoKey}`],
+              debugEnabled
+            )
+            return output
           }
 
           if (entry.type === "local") {
@@ -952,7 +1245,7 @@ Use \`repo_list()\` to see all registered repositories.`
               await saveManifest(updatedManifest)
             })
 
-            return `## Local Repository Unregistered
+            let output = `## Local Repository Unregistered
 
 **Repository**: ${repoKey}
 **Path**: ${entry.path}
@@ -960,10 +1253,17 @@ Use \`repo_list()\` to see all registered repositories.`
 The repository has been unregistered. Files are preserved at the path above.
 
 To re-register, run \`repo_scan()\`.`
+            output = appendDebug(
+              output,
+              "repo_remove",
+              [`repoKey: ${repoKey}`, `path: ${entry.path}`],
+              debugEnabled
+            )
+            return output
           }
 
           if (!args.confirm) {
-            return `## Confirmation Required
+            let output = `## Confirmation Required
 
 **Repository**: ${repoKey}
 **Path**: ${entry.path}
@@ -974,6 +1274,13 @@ This will **permanently delete** the cached repository from disk.
 To proceed: \`repo_remove({ repo: "${repoKey}", confirm: true })\`
 
 To keep the repo but unregister it, manually delete it from \`~/.cache/opencode-repos/manifest.json\`.`
+            output = appendDebug(
+              output,
+              "repo_remove",
+              [`repoKey: ${repoKey}`, `path: ${entry.path}`],
+              debugEnabled
+            )
+            return output
           }
 
           try {
@@ -985,7 +1292,7 @@ To keep the repo but unregister it, manually delete it from \`~/.cache/opencode-
               await saveManifest(updatedManifest)
             })
 
-            return `## Cached Repository Deleted
+            let output = `## Cached Repository Deleted
 
 **Repository**: ${repoKey}
 **Path**: ${entry.path}
@@ -993,6 +1300,13 @@ To keep the repo but unregister it, manually delete it from \`~/.cache/opencode-
 The repository has been permanently deleted from disk and unregistered from the cache.
 
 To re-clone: \`repo_clone({ repo: "${repoKey}" })\``
+            output = appendDebug(
+              output,
+              "repo_remove",
+              [`repoKey: ${repoKey}`, `path: ${entry.path}`],
+              debugEnabled
+            )
+            return output
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
 
@@ -1004,11 +1318,18 @@ To re-clone: \`repo_clone({ repo: "${repoKey}" })\``
               })
             } catch {}
 
-            return `## Deletion Failed
+            let output = `## Deletion Failed
 
 Failed to delete ${repoKey}: ${message}
 
 The repository has been unregistered from the manifest. You may need to manually delete the directory at: ${entry.path}`
+            output = appendDebug(
+              output,
+              "repo_remove",
+              [`repoKey: ${repoKey}`, `path: ${entry.path}`],
+              debugEnabled
+            )
+            return output
           }
         },
       }),
@@ -1132,6 +1453,12 @@ The repository has been unregistered from the manifest. You may need to manually
             output += `- Check if gh CLI is authenticated\n`
           }
 
+          output = appendDebug(
+            output,
+            "repo_find",
+            [`query: ${query}`, `localSearchPaths: ${localSearchPaths.length}`],
+            debugEnabled
+          )
           return output
         },
       }),
@@ -1156,10 +1483,20 @@ The repository has been unregistered from the manifest. You may need to manually
             const selected = result.trim()
 
             if (!selected) {
-              return "No folder selected."
+              return appendDebug(
+                "No folder selected.",
+                "repo_pick_dir",
+                [`platform: ${platform}`],
+                debugEnabled
+              )
             }
 
-            return `## Folder selected\n\n${selected}`
+            return appendDebug(
+              `## Folder selected\n\n${selected}`,
+              "repo_pick_dir",
+              [`platform: ${platform}`],
+              debugEnabled
+            )
           }
 
           if (platform === "win32") {
@@ -1173,25 +1510,40 @@ The repository has been unregistered from the manifest. You may need to manually
             const selected = result.trim()
 
             if (!selected) {
-              return "No folder selected."
+              return appendDebug(
+                "No folder selected.",
+                "repo_pick_dir",
+                [`platform: ${platform}`],
+                debugEnabled
+              )
             }
 
-            return `## Folder selected\n\n${selected}`
+            return appendDebug(
+              `## Folder selected\n\n${selected}`,
+              "repo_pick_dir",
+              [`platform: ${platform}`],
+              debugEnabled
+            )
           }
 
-          return "Folder picker is not supported on this platform."
+          return appendDebug(
+            "Folder picker is not supported on this platform.",
+            "repo_pick_dir",
+            [`platform: ${platform}`],
+            debugEnabled
+          )
         },
       }),
 
       repo_query: tool({
         description:
-          "Resolve a repository automatically and explore it with a subagent. Picks an exact match when possible, otherwise asks you to disambiguate. Can run multiple repos when specified.",
+          "Resolve a repository automatically and explore it with a subagent. Accepts local paths or owner/repo. Picks an exact match when possible, otherwise asks you to disambiguate. Can run multiple repos when specified.",
         args: {
           query: tool.schema
             .string()
             .optional()
             .describe(
-              "Repository name or owner/repo format. Examples: 'next.js', 'vercel/next.js', 'react'"
+              "Repository name, owner/repo, or absolute local path. Examples: 'next.js', 'vercel/next.js', '/Users/me/projects/app'"
             ),
           repos: tool.schema
             .array(tool.schema.string())
@@ -1218,11 +1570,23 @@ Provide either \`query\` or a non-empty \`repos\` list.`
             path?: string
           }> = []
 
+          const debugInfo: RepoQueryDebugInfo = {
+            query: args.query ?? explicitRepos.join(", "),
+            allowGithub: false,
+            localSearchPaths,
+            candidates: [],
+            selectedTargets: [],
+          }
+
           if (explicitRepos.length > 0) {
             for (const repo of explicitRepos) {
               try {
                 const spec = parseRepoSpec(repo)
                 targets.push({
+                  repoKey: `${spec.owner}/${spec.repo}`,
+                  branch: spec.branch || defaultBranch,
+                })
+                debugInfo.selectedTargets.push({
                   repoKey: `${spec.owner}/${spec.repo}`,
                   branch: spec.branch || defaultBranch,
                 })
@@ -1235,6 +1599,110 @@ Failed to parse \`${repo}\`: ${message}`
               }
             }
           } else {
+            const localPathResult = await resolveLocalPathQuery(
+              args.query!,
+              defaultBranch
+            )
+
+            if (localPathResult.error) {
+              let output = `## Local path error\n\n${localPathResult.error}`
+              if (debugEnabled) {
+                output += `\n\n${formatRepoQueryDebug(debugInfo)}`
+              }
+              return output
+            }
+
+            if (localPathResult.candidate) {
+              const candidate = localPathResult.candidate
+              targets.push({
+                repoKey: candidate.key,
+                branch: candidate.branch ?? defaultBranch,
+                source: candidate.source,
+                remote: candidate.remote,
+                path: candidate.path,
+              })
+              debugInfo.candidates = [candidate]
+              debugInfo.selectedTargets.push({
+                repoKey: candidate.key,
+                branch: candidate.branch ?? defaultBranch,
+              })
+            }
+
+            if (targets.length > 0) {
+              for (const target of targets) {
+                if (target.source === "local" && target.remote && target.path) {
+                  await registerLocalRepo(
+                    target.repoKey,
+                    target.path,
+                    target.branch,
+                    target.remote
+                  )
+                }
+              }
+            }
+
+            if (targets.length > 0) {
+              const results: Array<{ repoKey: string; response: string }> = []
+
+              for (const target of targets) {
+                try {
+                  const resolved = await ensureRepoAvailable(
+                    target.repoKey,
+                    target.branch,
+                    cacheDir,
+                    useHttps,
+                    autoSyncOnExplore,
+                    autoSyncIntervalHours
+                  )
+
+                  await requestExternalDirectoryAccess(
+                    ctx as PermissionContext,
+                    resolved.repoPath
+                  )
+
+                  const response = await runRepoExplorer(
+                    client as RepoClient,
+                    ctx,
+                    target.repoKey,
+                    resolved.repoPath,
+                    args.question
+                  )
+
+                  await touchRepoAccess(target.repoKey)
+
+                  results.push({
+                    repoKey: target.repoKey,
+                    response,
+                  })
+                } catch (error) {
+                  const message =
+                    error instanceof Error ? error.message : String(error)
+                  results.push({
+                    repoKey: target.repoKey,
+                    response: `## Exploration failed\n\n${message}`,
+                  })
+                }
+              }
+
+              if (results.length === 1) {
+                if (debugEnabled) {
+                  return `${results[0].response}\n\n${formatRepoQueryDebug(debugInfo)}`
+                }
+                return results[0].response
+              }
+
+              let output = "## Repository Exploration Results\n\n"
+              for (const result of results) {
+                output += `### ${result.repoKey}\n\n${result.response}\n\n`
+              }
+
+              if (debugEnabled) {
+                output += `${formatRepoQueryDebug(debugInfo)}\n`
+              }
+
+              return output
+            }
+
             const manifest = await loadManifest()
             let allowGithub = false
 
@@ -1247,6 +1715,8 @@ Failed to parse \`${repo}\`: ${message}`
               }
             }
 
+            debugInfo.allowGithub = allowGithub
+
             const { candidates, exactRepoKey, branchOverride } = await resolveCandidates(
               args.query!,
               localSearchPaths,
@@ -1255,9 +1725,11 @@ Failed to parse \`${repo}\`: ${message}`
               allowGithub
             )
 
+            debugInfo.candidates = candidates
+
             if (candidates.length === 0) {
               if (!allowGithub) {
-                return `## No local repositories matched
+                let output = `## No local repositories matched
 
 No repositories matched \`${args.query}\` in the local registry.
 
@@ -1267,14 +1739,22 @@ Provide a local path or configure search paths:
 - Or set \`localSearchPaths\` in ~/.config/opencode/opencode-repos.json
 - Or pass an explicit repo in \`repos\` (owner/repo)
 `
+                if (debugEnabled) {
+                  output += `\n${formatRepoQueryDebug(debugInfo)}`
+                }
+                return output
               }
-              return `## No repositories found
+              let output = `## No repositories found
 
 No repositories matched \`${args.query}\`.
 
 Try:
 - Using owner/repo format for exact matches
 - Running \`repo_find({ query: "${args.query}" })\` to see available options`
+              if (debugEnabled) {
+                output += `\n${formatRepoQueryDebug(debugInfo)}`
+              }
+              return output
             }
 
             if (candidates.length > 1 && !exactRepoKey) {
@@ -1287,6 +1767,10 @@ Be more specific or pass an explicit list with \`repos\`.
                 const sourceLabel = candidate.source === "registered" ? "registered" : candidate.source
                 const description = candidate.description ? ` - ${candidate.description.slice(0, 80)}` : ""
                 output += `- ${candidate.key} (${sourceLabel})${description}\n`
+              }
+
+              if (debugEnabled) {
+                output += `\n${formatRepoQueryDebug(debugInfo)}`
               }
 
               return output
@@ -1302,6 +1786,11 @@ Be more specific or pass an explicit list with \`repos\`.
               remote: selected.remote,
               path: selected.path,
             })
+
+            debugInfo.selectedTargets.push({
+              repoKey: selected.key,
+              branch,
+            })
           }
 
           for (const target of targets) {
@@ -1315,50 +1804,62 @@ Be more specific or pass an explicit list with \`repos\`.
             }
           }
 
-          const results = await Promise.all(
-            targets.map(async (target) => {
-              try {
-                const resolved = await ensureRepoAvailable(
-                  target.repoKey,
-                  target.branch,
-                  cacheDir,
-                  useHttps,
-                  autoSyncOnExplore,
-                  autoSyncIntervalHours
-                )
+          const results: Array<{ repoKey: string; response: string }> = []
 
-                const response = await runRepoExplorer(
-                  client as RepoClient,
-                  ctx,
-                  target.repoKey,
-                  resolved.repoPath,
-                  args.question
-                )
+          for (const target of targets) {
+            try {
+              const resolved = await ensureRepoAvailable(
+                target.repoKey,
+                target.branch,
+                cacheDir,
+                useHttps,
+                autoSyncOnExplore,
+                autoSyncIntervalHours
+              )
 
-                await touchRepoAccess(target.repoKey)
+              await requestExternalDirectoryAccess(
+                ctx as PermissionContext,
+                resolved.repoPath
+              )
 
-                return {
-                  repoKey: target.repoKey,
-                  response,
-                }
-              } catch (error) {
-                const message =
-                  error instanceof Error ? error.message : String(error)
-                return {
-                  repoKey: target.repoKey,
-                  response: `## Exploration failed\n\n${message}`,
-                }
-              }
-            })
-          )
+              const response = await runRepoExplorer(
+                client as RepoClient,
+                ctx,
+                target.repoKey,
+                resolved.repoPath,
+                args.question
+              )
+
+              await touchRepoAccess(target.repoKey)
+
+              results.push({
+                repoKey: target.repoKey,
+                response,
+              })
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : String(error)
+              results.push({
+                repoKey: target.repoKey,
+                response: `## Exploration failed\n\n${message}`,
+              })
+            }
+          }
 
           if (results.length === 1) {
+            if (debugEnabled) {
+              return `${results[0].response}\n\n${formatRepoQueryDebug(debugInfo)}`
+            }
             return results[0].response
           }
 
           let output = "## Repository Exploration Results\n\n"
           for (const result of results) {
             output += `### ${result.repoKey}\n\n${result.response}\n\n`
+          }
+
+          if (debugEnabled) {
+            output += `${formatRepoQueryDebug(debugInfo)}\n`
           }
 
           return output
@@ -1394,14 +1895,21 @@ Be more specific or pass an explicit list with \`repos\`.
               autoSyncIntervalHours
             )
             repoPath = resolved.repoPath
+            await requestExternalDirectoryAccess(ctx as PermissionContext, repoPath)
           } catch (error) {
             const message =
               error instanceof Error ? error.message : String(error)
-            return `## Failed to prepare repository
+            const output = `## Failed to prepare repository
 
 Failed to prepare ${args.repo}: ${message}
 
 Please check that the repository exists and you have access to it.`
+            return appendDebug(
+              output,
+              "repo_explore",
+              [`repoKey: ${repoKey}`, `branch: ${branch}`],
+              debugEnabled
+            )
           }
 
           try {
@@ -1413,15 +1921,26 @@ Please check that the repository exists and you have access to it.`
               args.question
             )
             await touchRepoAccess(repoKey)
-            return response
+            return appendDebug(
+              response,
+              "repo_explore",
+              [`repoKey: ${repoKey}`, `branch: ${branch}`, `path: ${repoPath}`],
+              debugEnabled
+            )
           } catch (error) {
             const message =
               error instanceof Error ? error.message : String(error)
-            return `## Exploration failed
+            const output = `## Exploration failed
 
 Failed to spawn exploration agent: ${message}
 
 This may indicate an issue with the OpenCode session or agent registration.`
+            return appendDebug(
+              output,
+              "repo_explore",
+              [`repoKey: ${repoKey}`, `branch: ${branch}`],
+              debugEnabled
+            )
           }
         },
       }),
