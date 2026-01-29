@@ -58,20 +58,47 @@ export function buildGitUrl(owner: string, repo: string, useHttps: boolean = fal
   return `git@github.com:${owner}/${repo}.git`
 }
 
+export async function getRemoteDefaultBranch(url: string): Promise<string | null> {
+  try {
+    const output = await $`git ls-remote --symref ${url} HEAD`.text()
+    const match = output.match(/ref: refs\/heads\/(\S+)\s+HEAD/)
+    return match?.[1] ?? null
+  } catch {
+    return null
+  }
+}
+
 export async function cloneRepo(
   url: string,
   destPath: string,
   options: CloneOptions = {}
-): Promise<void> {
-  const branch = options.branch || "main"
+): Promise<{ branch: string }> {
+  const requestedBranch = options.branch || "main"
 
   try {
-    await $`git clone --depth=1 --branch ${branch} --config core.hooksPath=/dev/null ${url} ${destPath}`.quiet()
-  } catch (error) {
+    await $`git clone --depth=1 --branch ${requestedBranch} --config core.hooksPath=/dev/null ${url} ${destPath}`.quiet()
+    return { branch: requestedBranch }
+  } catch (firstError) {
     try {
       await rm(destPath, { recursive: true, force: true })
     } catch {}
-    throw error
+
+    if (!options.branch) {
+      const defaultBranch = await getRemoteDefaultBranch(url)
+      if (defaultBranch && defaultBranch !== requestedBranch) {
+        try {
+          await $`git clone --depth=1 --branch ${defaultBranch} --config core.hooksPath=/dev/null ${url} ${destPath}`.quiet()
+          return { branch: defaultBranch }
+        } catch (secondError) {
+          try {
+            await rm(destPath, { recursive: true, force: true })
+          } catch {}
+          throw secondError
+        }
+      }
+    }
+
+    throw firstError
   }
 }
 

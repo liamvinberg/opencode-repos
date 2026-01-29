@@ -8,6 +8,7 @@ import {
   cloneRepo,
   updateRepo,
   getRepoInfo,
+  getRemoteDefaultBranch,
 } from "../git"
 
 describe("parseRepoSpec", () => {
@@ -90,6 +91,22 @@ describe("buildGitUrl", () => {
   })
 })
 
+describe("getRemoteDefaultBranch", () => {
+  test("returns default branch for a public repo", async () => {
+    const branch = await getRemoteDefaultBranch(
+      "https://github.com/octocat/Hello-World.git"
+    )
+    expect(branch).toBe("master")
+  })
+
+  test("returns null for nonexistent repo", async () => {
+    const branch = await getRemoteDefaultBranch(
+      "https://github.com/nonexistent-user-12345/nonexistent-repo-67890.git"
+    )
+    expect(branch).toBeNull()
+  })
+})
+
 describe("git operations (integration)", () => {
   const testDir = join(tmpdir(), `opencode-repos-test-${Date.now()}`)
   const repoPath = join(testDir, "test-repo")
@@ -102,13 +119,14 @@ describe("git operations (integration)", () => {
     await rm(testDir, { recursive: true, force: true })
   })
 
-  test("cloneRepo clones a public repository", async () => {
-    await cloneRepo(
+  test("cloneRepo clones a public repository and returns branch", async () => {
+    const result = await cloneRepo(
       "https://github.com/octocat/Hello-World.git",
       repoPath,
       { branch: "master" }
     )
 
+    expect(result.branch).toBe("master")
     const exists = await Bun.file(join(repoPath, ".git/config")).exists()
     expect(exists).toBe(true)
   })
@@ -142,5 +160,18 @@ describe("git operations (integration)", () => {
       const exists = await Bun.file(badPath).exists()
       expect(exists).toBe(false)
     }
+  })
+
+  test("cloneRepo falls back to actual default branch when main does not exist", async () => {
+    const fallbackPath = join(testDir, "fallback-repo")
+
+    const result = await cloneRepo(
+      "https://github.com/octocat/Hello-World.git",
+      fallbackPath
+    )
+
+    expect(result.branch).toBe("master")
+    const exists = await Bun.file(join(fallbackPath, ".git/config")).exists()
+    expect(exists).toBe(true)
   })
 })

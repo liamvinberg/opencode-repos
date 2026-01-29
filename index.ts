@@ -347,9 +347,11 @@ async function ensureRepoAvailable(
     const repoPath = join(cacheDir, owner, repo)
     const url = buildGitUrl(owner, repo, useHttps)
 
+    let actualBranch = branch
     try {
       await withManifestLock(async () => {
-        await cloneRepo(url, repoPath, { branch })
+        const cloneResult = await cloneRepo(url, repoPath, { branch })
+        actualBranch = cloneResult.branch
 
         const now = new Date().toISOString()
         const updatedManifest = await loadManifest()
@@ -359,7 +361,7 @@ async function ensureRepoAvailable(
           clonedAt: now,
           lastAccessed: now,
           lastUpdated: now,
-          currentBranch: branch,
+          currentBranch: actualBranch,
           shallow: true,
         }
         await saveManifest(updatedManifest)
@@ -371,7 +373,7 @@ async function ensureRepoAvailable(
 
     return {
       repoPath,
-      branch,
+      branch: actualBranch,
       type: "cached",
     }
   }
@@ -988,8 +990,10 @@ When user mentions another project or asks about external code:
               } catch {}
             }
 
+            let actualBranch = branch
             try {
-              await cloneRepo(url, destPath, { branch })
+              const cloneResult = await cloneRepo(url, destPath, { branch })
+              actualBranch = cloneResult.branch
             } catch (error) {
               const message =
                 error instanceof Error ? error.message : String(error)
@@ -1003,7 +1007,7 @@ When user mentions another project or asks about external code:
               clonedAt: now,
               lastAccessed: now,
               lastUpdated: now,
-              currentBranch: branch,
+              currentBranch: actualBranch,
               shallow: true,
             }
             manifest.repos[repoKey] = entry
@@ -1012,7 +1016,7 @@ When user mentions another project or asks about external code:
 
             return {
               path: destPath,
-              branch,
+              branch: actualBranch,
               status: "cloned" as const,
               alreadyExists: false,
             }
