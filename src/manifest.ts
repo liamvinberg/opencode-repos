@@ -1,6 +1,6 @@
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { mkdir, rename, unlink, stat } from "node:fs/promises"
+import { mkdir, rename, unlink, stat, open } from "node:fs/promises"
 
 export interface RepoEntry {
   type: "cached" | "local"
@@ -27,7 +27,7 @@ let cacheDir = join(homedir(), ".cache", "opencode-repos")
 let manifestPath = join(cacheDir, "manifest.json")
 let manifestTmpPath = join(cacheDir, "manifest.json.tmp")
 let lockPath = join(cacheDir, "manifest.lock")
-const LOCK_STALE_MS = 5 * 60 * 1000
+const LOCK_STALE_MS = 30_000
 
 function createEmptyManifest(): Manifest {
   return {
@@ -72,31 +72,33 @@ async function isLockStale(): Promise<boolean> {
 }
 
 async function acquireLock(): Promise<void> {
-  const maxAttempts = 50
-  const retryDelayMs = 100
+  const maxAttempts = 150
+  const retryDelayMs = 200
+
+  await mkdir(cacheDir, { recursive: true })
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const lockFile = Bun.file(lockPath)
-    const exists = await lockFile.exists()
-
-    if (exists) {
-      if (await isLockStale()) {
-        await unlink(lockPath).catch(() => {})
-      } else {
-        await Bun.sleep(retryDelayMs)
-        continue
+    try {
+      const fd = await open(lockPath, "wx")
+      await fd.write(String(process.pid))
+      await fd.close()
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== "EEXIST") {
+        throw error
       }
     }
 
-    try {
-      await mkdir(cacheDir, { recursive: true })
-      await Bun.write(lockPath, String(Date.now()))
-      return
-    } catch {
-      await Bun.sleep(retryDelayMs)
+    if (await isLockStale()) {
+      await unlink(lockPath).catch(() => {})
+      continue
     }
+
+    await Bun.sleep(retryDelayMs)
   }
 
+  await unlink(lockPath).catch(() => {})
   throw new Error("Failed to acquire manifest lock after maximum attempts")
 }
 
