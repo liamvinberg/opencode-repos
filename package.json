@@ -1,29 +1,29 @@
 {
-	"name": "opencode-repos",
-	"version": "0.3.1",
-	"description": "Repository cache, registry, and cross-codebase intelligence for OpenCode agents",
-	"main": "index.ts",
-	"type": "module",
-	"keywords": [
-		"opencode",
-		"opencode-plugin",
-		"repos",
-		"repository",
-		"cache",
-		"codebase"
-	],
-	"author": "Liam Vinberg",
-	"license": "MIT",
-	"repository": {
-		"type": "git",
-		"url": "https://github.com/liamjv1/opencode-repos"
-	},
-	"peerDependencies": {
-		"@opencode-ai/plugin": "*"
-	},
-	"devDependencies": {
-		"@opencode-ai/plugin": "^1.1.25",
-		"@types/bun": "^1.2.0",
-		"typescript": "^5.0.0"
-	}
+  "name": "opencode-repos",
+  "version": "0.3.2",
+  "description": "Repository cache, registry, and cross-codebase intelligence for OpenCode agents",
+  "main": "index.ts",
+  "type": "module",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "repos",
+    "repository",
+    "cache",
+    "codebase"
+  ],
+  "author": "Liam Vinberg",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/liamjv1/opencode-repos"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.1.25",
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.0.0"
+  }
 }
