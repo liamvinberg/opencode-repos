@@ -333,7 +333,8 @@ async function ensureRepoAvailable(
   cacheDir: string,
   useHttps: boolean,
   autoSyncOnExplore: boolean,
-  autoSyncIntervalHours: number
+  autoSyncIntervalHours: number,
+  explicitBranch?: string
 ): Promise<{
   repoPath: string
   branch: string
@@ -350,7 +351,8 @@ async function ensureRepoAvailable(
     let actualBranch = branch
     try {
       await withManifestLock(async () => {
-        const cloneResult = await cloneRepo(url, repoPath, { branch })
+        const cloneOptions = explicitBranch ? { branch: explicitBranch } : {}
+        const cloneResult = await cloneRepo(url, repoPath, cloneOptions)
         actualBranch = cloneResult.branch
 
         const now = new Date().toISOString()
@@ -957,7 +959,8 @@ When user mentions another project or asks about external code:
         },
         async execute(args) {
           const spec = parseRepoSpec(args.repo)
-          const branch = spec.branch || defaultBranch
+          const explicitBranch = spec.branch
+          const branch = explicitBranch || defaultBranch
           const repoKey = `${spec.owner}/${spec.repo}`
 
           const result = await withManifestLock(async () => {
@@ -992,7 +995,8 @@ When user mentions another project or asks about external code:
 
             let actualBranch = branch
             try {
-              const cloneResult = await cloneRepo(url, destPath, { branch })
+              const cloneOptions = explicitBranch ? { branch: explicitBranch } : {}
+              const cloneResult = await cloneRepo(url, destPath, cloneOptions)
               actualBranch = cloneResult.branch
             } catch (error) {
               const message =
@@ -1842,6 +1846,7 @@ Provide either \`query\` or a non-empty \`repos\` list.`
           const targets: Array<{
             repoKey: string
             branch: string
+            explicitBranch?: string
             source?: RepoSource
             remote?: string
             path?: string
@@ -1862,6 +1867,7 @@ Provide either \`query\` or a non-empty \`repos\` list.`
                 targets.push({
                   repoKey: `${spec.owner}/${spec.repo}`,
                   branch: spec.branch || defaultBranch,
+                  explicitBranch: spec.branch ?? undefined,
                 })
                 debugInfo.selectedTargets.push({
                   repoKey: `${spec.owner}/${spec.repo}`,
@@ -1930,7 +1936,8 @@ Failed to parse \`${repo}\`: ${message}`
                     cacheDir,
                     useHttps,
                     autoSyncOnExplore,
-                    autoSyncIntervalHours
+                    autoSyncIntervalHours,
+                    target.explicitBranch
                   )
 
                   await requestExternalDirectoryAccess(
@@ -2067,6 +2074,7 @@ Be more specific or pass an explicit list with \`repos\`.
             targets.push({
               repoKey: selected.key,
               branch,
+              explicitBranch: branchOverride ?? undefined,
               source: selected.source,
               remote: selected.remote,
               path: selected.path,
@@ -2099,7 +2107,8 @@ Be more specific or pass an explicit list with \`repos\`.
                 cacheDir,
                 useHttps,
                 autoSyncOnExplore,
-                autoSyncIntervalHours
+                autoSyncIntervalHours,
+                target.explicitBranch
               )
 
               await requestExternalDirectoryAccess(
@@ -2181,7 +2190,8 @@ Be more specific or pass an explicit list with \`repos\`.
               cacheDir,
               useHttps,
               autoSyncOnExplore,
-              autoSyncIntervalHours
+              autoSyncIntervalHours,
+              spec.branch ?? undefined
             )
             repoPath = resolved.repoPath
             await requestExternalDirectoryAccess(ctx as PermissionContext, repoPath)
