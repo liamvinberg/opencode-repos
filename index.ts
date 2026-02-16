@@ -276,6 +276,15 @@ async function fetchRemoteTree(repoKey: string, branch: string): Promise<{ files
   }
 }
 
+async function getGitHubDefaultBranch(repoKey: string): Promise<string | null> {
+  try {
+    const branch = (await $`gh api repos/${repoKey} --jq .default_branch`.text()).trim()
+    return branch || null
+  } catch {
+    return null
+  }
+}
+
 async function readRemoteFile(repoKey: string, branch: string, path: string): Promise<string> {
   const encodedPath = encodeRepoPathForApi(path)
   if (!encodedPath) {
@@ -631,7 +640,14 @@ export const OpencodeRepos: Plugin = async ({ directory }) => {
           limit: tool.schema.number().optional().default(200).describe("Maximum file paths to return"),
         },
         async execute(args) {
-          const target = resolveRepoTarget(args.repo, config.defaultBranch)
+          const initialTarget = resolveRepoTarget(args.repo, config.defaultBranch)
+          const target = {
+            ...initialTarget,
+            branch:
+              initialTarget.explicitBranch ??
+              (await getGitHubDefaultBranch(initialTarget.repoKey)) ??
+              initialTarget.branch,
+          }
           const prefix = normalizeRepoPath(args.path ?? "")
           const limit = Math.max(1, Math.min(args.limit ?? 200, 2000))
 
@@ -678,7 +694,14 @@ export const OpencodeRepos: Plugin = async ({ directory }) => {
           maxLines: tool.schema.number().optional().default(500).describe("Maximum lines to return"),
         },
         async execute(args) {
-          const target = resolveRepoTarget(args.repo, config.defaultBranch)
+          const initialTarget = resolveRepoTarget(args.repo, config.defaultBranch)
+          const target = {
+            ...initialTarget,
+            branch:
+              initialTarget.explicitBranch ??
+              (await getGitHubDefaultBranch(initialTarget.repoKey)) ??
+              initialTarget.branch,
+          }
           const filePath = normalizeRepoPath(args.path)
           const maxLines = Math.max(1, args.maxLines ?? 500)
 

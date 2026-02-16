@@ -12,6 +12,7 @@ This rewrite focuses on stability and predictable behavior instead of advanced o
 - Handles branch fallback more safely when default branch is not `main`
 - Registers local repositories from configured search paths
 - Lists and reads remote GitHub files without cloning
+- Auto-detects the repository default branch for remote no-clone browsing
 - Reads files from registered repositories with optional glob support
 - Registers a dedicated `repo-explorer` subagent for external codebase analysis
 
@@ -84,6 +85,8 @@ repo_tree({ repo: "vercel/next.js" })
 repo_tree({ repo: "vercel/next.js@canary", path: "packages/next/src", limit: 300 })
 ```
 
+If no branch is specified, the tool resolves the repository default branch automatically.
+
 ### `repo_read_remote`
 
 Read one remote file directly from GitHub API (no clone).
@@ -92,6 +95,8 @@ Read one remote file directly from GitHub API (no clone).
 repo_read_remote({ repo: "vercel/next.js", path: "README.md" })
 repo_read_remote({ repo: "vercel/next.js@canary", path: "packages/next/src/server/next.ts", maxLines: 200 })
 ```
+
+If no branch is specified, the tool resolves the repository default branch automatically.
 
 ### `repo_read`
 
