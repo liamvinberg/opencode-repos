@@ -1,34 +1,25 @@
 # opencode-repos
 
-Repository cache, registry, and cross-codebase intelligence for opencode agents.
+Minimal repository cache and registry plugin for OpenCode.
 
-## Features
+This rewrite focuses on stability and predictable behavior instead of advanced orchestration.
 
-- **Clone and cache** - Clone repositories to local cache for fast repeated access
-- **Local repo scanning** - Discover and register existing local repositories
-- **Cross-repo exploration** - Use AI agents to understand external codebases
-- **Unified registry** - Single manifest tracks both cached and local repos
-- **Glob pattern support** - Read multiple files with glob patterns
+## What It Does
 
-## Installation
+- Clones GitHub repositories into a local cache
+- Reuses or repairs existing cache directories when possible
+- Falls back across SSH/HTTPS clone URLs to reduce `git clone` exit code 128 failures
+- Handles branch fallback more safely when default branch is not `main`
+- Registers local repositories from configured search paths
+- Reads files from registered repositories with optional glob support
 
-### From npm (when published)
-
-```bash
-npm install opencode-repos
-```
-
-### Local development
+## Install
 
 ```bash
-git clone https://github.com/liamjv1/opencode-repos
-cd opencode-repos
 bun install
 ```
 
-### Configuration
-
-Add to your OpenCode config (`~/.config/opencode/opencode.jsonc` or `.opencode/config.jsonc`):
+Then add the plugin path to OpenCode config:
 
 ```json
 {
@@ -38,457 +29,101 @@ Add to your OpenCode config (`~/.config/opencode/opencode.jsonc` or `.opencode/c
 }
 ```
 
-## Quick Start
-
-```typescript
-// Clone a repository
-repo_clone({ repo: "vercel/next.js" })
-
-// List all registered repositories
-repo_list()
-
-// Read files from a repository
-repo_read({ repo: "vercel/next.js", path: "README.md" })
-
-// Explore a repository to understand it
-repo_explore({ 
-  repo: "vercel/next.js", 
-  question: "How does the App Router work?" 
-})
-
-// Resolve a repo automatically and explore it
-repo_query({
-  query: "react",
-  question: "How does the reconciliation algorithm work?"
-})
-```
-
 ## Configuration
 
-Create `~/.config/opencode/opencode-repos.json` to configure the plugin:
+Optional file: `~/.config/opencode/opencode-repos.json`
 
 ```json
 {
-  "localSearchPaths": [
-    "~/projects",
-    "~/personal/projects",
-    "~/code"
-  ],
-  "includeProjectParent": true,
-  "cleanupMaxAgeDays": 30,
-  "cacheDir": "/tmp/opencode-repos",
-  "useHttps": false,
-  "autoSyncOnExplore": true,
-  "autoSyncIntervalHours": 24,
+  "cacheDir": "~/.cache/opencode-repos",
+  "localSearchPaths": ["~/projects"],
   "defaultBranch": "main",
-  "debug": false,
-  "repoExplorerModel": "opencode/grok-code",
-  "debugLogPath": "~/.cache/opencode-repos/debug.log"
+  "useHttps": true,
+  "includeProjectParent": true
 }
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `localSearchPaths` | `[]` | Directories to scan for local git repositories |
-| `includeProjectParent` | `true` | Also search the parent of the current project directory |
-| `cleanupMaxAgeDays` | `30` | Auto-delete cached repos not accessed in this many days |
-| `cacheDir` | `/tmp/opencode-repos` | Where to store cloned repositories |
-| `useHttps` | `false` | Use HTTPS instead of SSH for cloning (useful behind firewalls) |
-| `autoSyncOnExplore` | `true` | Auto-fetch latest before exploring a repo |
-| `autoSyncIntervalHours` | `24` | Minimum hours between auto-fetch updates |
-| `defaultBranch` | `"main"` | Default branch when none specified (some repos use "master") |
-| `debug` | `false` | Include debug details in tool responses |
-| `repoExplorerModel` | `"opencode/grok-code"` | Model used by the repo-explorer subagent |
-| `debugLogPath` | `"~/.cache/opencode-repos/debug.log"` | File path for debug logs |
-
-Cleanup runs automatically on plugin load.
-
-To avoid repeated prompts when exploring external repos, update your OpenCode permissions (`~/.config/opencode/opencode.jsonc`) to allow external directories as needed.
-
-Example permission config:
-
-```json
-{
-  "permission": {
-    "external_directory": {
-      "*": "ask",
-      "/tmp/opencode-repos/*": "allow"
-    }
-}
-}
-```
-
-If you hit intermittent subagent session errors, enable debug logging and retry. The plugin includes a small retry/backoff when prompting the repo-explorer subagent.
+| `cacheDir` | `~/.cache/opencode-repos` | Where cached clones are stored |
+| `localSearchPaths` | `[]` | Paths scanned by `repo_scan` and `repo_find` |
+| `defaultBranch` | `main` | Branch used when repo spec has no branch |
+| `useHttps` | `true` | Preferred clone protocol; plugin auto-falls back to the other protocol |
+| `includeProjectParent` | `true` | Adds current project parent folder to search paths |
 
 ## Tools
 
-### repo_find
+### `repo_clone`
 
-Search for a repository locally and on GitHub. Use this before cloning to check if a repo already exists locally or to find the correct GitHub repo.
+Clone or reuse a cached repository.
 
-**Arguments:**
-- `query` (string, required): Repository name or owner/repo format. Examples: `"next.js"`, `"vercel/next.js"`, `"react"`
-
-**Examples:**
-```typescript
-// Search by name (fuzzy)
-repo_find({ query: "next.js" })
-
-// Search by exact owner/repo
-repo_find({ query: "vercel/next.js" })
-
-// Find a library
-repo_find({ query: "react" })
-```
-
-**Returns:** Results grouped by location:
-- **Already Registered** - Repos in manifest (cached or local)
-- **Found Locally** - Repos on filesystem not yet registered
-- **Found on GitHub** - Repos available to clone
-
-**Note:** Requires `gh` CLI for GitHub search. Configure `localSearchPaths` in config for local filesystem search.
-
----
-
-### repo_query
-
-Resolve a repository automatically and explore it with the repo-explorer agent. If multiple repos match, it asks you to disambiguate. Accepts explicit repo lists for multi-repo questions.
-
-**Arguments:**
-- `query` (string, optional): Repository name, owner/repo, or absolute local path. Examples: `"next.js"`, `"vercel/next.js"`, `"/Users/me/projects/app"`
-- `repos` (string[], optional): Explicit repositories to explore (`owner/repo` or `owner/repo@branch`)
-- `question` (string, required): What you want to understand about the codebase
-
-**Examples:**
-```typescript
-// Automatic resolution
-repo_query({
-  query: "react",
-  question: "How does reconciliation work?"
-})
-
-// Absolute local path
-repo_query({
-  query: "/Users/me/projects/firmware",
-  question: "Where is the BLE handshake implemented?"
-})
-
-// Explicit repo list
-repo_query({
-  repos: ["acme/firmware", "acme/app"],
-  question: "Where is the BLE handshake implemented?"
-})
-```
-
-**Returns:** Exploration output from one or more repositories
-
----
-
-### repo_pick_dir
-
-Open a native folder picker and return the selected path. Call this immediately after the user asks for a local repo to avoid delayed popups if they step away.
-
-**Arguments:**
-- `prompt` (string, optional): Prompt text shown in the picker dialog
-
-**Examples:**
-```typescript
-repo_pick_dir({ prompt: "Select your firmware repo" })
-```
-
-**Returns:** Selected folder path
-
----
-
-### repo_clone
-
-Clone a repository to local cache or return path if already cached.
-
-**Arguments:**
-- `repo` (string, required): Repository in format `owner/repo` or `owner/repo@branch`
-- `force` (boolean, optional): Force re-clone even if cached. Default: `false`
-
-**Examples:**
-```typescript
-// Clone a repository (default branch)
+```ts
 repo_clone({ repo: "vercel/next.js" })
-
-// Clone a specific branch
 repo_clone({ repo: "vercel/next.js@canary" })
-
-// Force re-clone
 repo_clone({ repo: "vercel/next.js", force: true })
 ```
 
-**Returns:** Path to the cached repository
+### `repo_list`
 
----
+List registered repositories.
 
-### repo_list
-
-List all registered repositories (cached and local).
-
-**Arguments:**
-- `type` (enum, optional): Filter by repository type. Options: `"all"`, `"cached"`, `"local"`. Default: `"all"`
-
-**Examples:**
-```typescript
-// List all repositories
+```ts
 repo_list()
-
-// List only cached repositories
 repo_list({ type: "cached" })
-
-// List only local repositories
 repo_list({ type: "local" })
 ```
 
-**Returns:** Markdown table with repository metadata (type, branch, last accessed, size)
-
----
-
-### repo_read
+### `repo_read`
 
 Read files from a registered repository.
 
-**Arguments:**
-- `repo` (string, required): Repository in format `owner/repo` or `owner/repo@branch`
-- `path` (string, required): File path within repo, supports glob patterns
-- `maxLines` (number, optional): Max lines per file to return. Default: `500`
-
-**Examples:**
-```typescript
-// Read a single file
+```ts
 repo_read({ repo: "vercel/next.js", path: "README.md" })
-
-// Read multiple files with glob
-repo_read({ repo: "vercel/next.js", path: "src/*.ts" })
-
-// Custom line limit
-repo_read({ repo: "vercel/next.js", path: "package.json", maxLines: 100 })
+repo_read({ repo: "vercel/next.js", path: "packages/**/*.ts", maxLines: 300 })
 ```
 
-**Returns:** File contents as markdown code blocks
+### `repo_update`
 
----
+Update a cached repository (or show status for local repositories).
 
-### repo_scan
-
-Scan local filesystem for git repositories and register them.
-
-**Arguments:**
-- `paths` (string[], optional): Override search paths. Default: from config file
-
-**Examples:**
-```typescript
-// Scan configured paths
-repo_scan()
-
-// Scan custom paths
-repo_scan({ paths: ["~/work", "~/projects"] })
-```
-
-**Returns:** Summary of found repositories (new vs existing)
-
----
-
-### repo_update
-
-Update a cached repository to latest commit.
-
-**Arguments:**
-- `repo` (string, required): Repository in format `owner/repo` or `owner/repo@branch`
-
-**Examples:**
-```typescript
-// Update a cached repository
+```ts
+repo_update({ repo: "vercel/next.js" })
 repo_update({ repo: "vercel/next.js@canary" })
 ```
 
-**Returns:** Update status with latest commit hash
+### `repo_remove`
 
-**Note:** Local repositories show git status only (files are never modified by the plugin).
+Unregister a local repo or delete a cached repo.
 
----
-
-### repo_remove
-
-Remove a repository (delete cached, unregister local).
-
-**Arguments:**
-- `repo` (string, required): Repository in format `owner/repo` or `owner/repo@branch`
-- `confirm` (boolean, optional): Confirm deletion for cached repos. Default: `false`
-
-**Examples:**
-```typescript
-// Unregister a local repository (files preserved)
-repo_remove({ repo: "my-org/my-project" })
-
-// Delete a cached repository (requires confirmation)
+```ts
+repo_remove({ repo: "vercel/next.js" })
 repo_remove({ repo: "vercel/next.js", confirm: true })
 ```
 
-**Returns:** Removal status
+### `repo_scan`
 
----
+Scan local filesystem paths and register discovered local repos.
 
-### repo_explore
-
-Explore a repository to understand its codebase using AI agent.
-
-**Arguments:**
-- `repo` (string, required): Repository in format `owner/repo` or `owner/repo@branch`
-- `question` (string, required): What you want to understand about the codebase
-
-**Examples:**
-```typescript
-// Understand architecture
-repo_explore({ 
-  repo: "vercel/next.js", 
-  question: "How does the App Router work?" 
-})
-
-// Find API usage
-repo_explore({ 
-  repo: "facebook/react", 
-  question: "How do I use useEffect with cleanup?" 
-})
-
-// Understand patterns
-repo_explore({ 
-  repo: "acme/firmware", 
-  question: "What patterns does this use for error handling?" 
-})
-```
-
-**Returns:** Detailed analysis with file paths and code examples
-
----
-
-## Custom Agent: repo-explorer
-
-The plugin registers a specialized `repo-explorer` agent for deep codebase analysis.
-
-**Capabilities:**
-- Read and analyze source code across any programming language
-- Search for patterns and implementations using grep, glob, and AST tools
-- Understand project structure and architecture
-- Identify APIs, interfaces, and integration points
-- Trace code paths and data flows
-- Explain complex implementations in simple terms
-
-**Permissions:** Read-only (cannot modify, create, or delete files)
-
-**Use Cases:**
-- Understanding how to integrate with another project
-- Learning from open-source implementations
-- Debugging cross-project issues
-- API discovery and documentation
-- Understanding unfamiliar codebases before contributing
-
----
-
-## Use Cases
-
-### Cross-project integration
-
-Working on Project A (backend) and need to integrate with Project B (firmware):
-
-```typescript
-repo_explore({ 
-  repo: "acme/firmware@main", 
-  question: "How does the sensor calibration API work?" 
-})
-```
-
-The explorer agent analyzes the firmware codebase and explains the API with file references and examples.
-
-### Understanding dependencies
-
-Learn how a library works internally:
-
-```typescript
-repo_explore({ 
-  repo: "facebook/react", 
-  question: "How does React's reconciliation algorithm work?" 
-})
-```
-
-### Firmware/backend exploration
-
-Frontend developer needs to understand backend API:
-
-```typescript
-repo_explore({ 
-  repo: "company/backend@develop", 
-  question: "What's the API for user authentication?" 
-})
-```
-
-### Multi-repo development
-
-Register all your local projects for quick access:
-
-```typescript
-// Configure search paths once
-// ~/.config/opencode/opencode-repos.json
-{
-  "localSearchPaths": ["~/work", "~/personal"]
-}
-
-// Scan and register
+```ts
 repo_scan()
-
-// Now access any local repo
-repo_read({ repo: "my-org/api-service", path: "src/routes/*.ts" })
+repo_scan({ paths: ["~/projects", "~/work"] })
 ```
 
----
+### `repo_find`
 
-## Limitations
+Search registered repos, local repos, and GitHub (if `gh` is installed and authenticated).
 
-- **No submodules**: Git submodules are not cloned or supported
-- **No LFS**: Git Large File Storage is not supported
-- **Shallow clones only**: All cached repos use `--depth=1` for fast cloning
-- **GitHub only**: Remote URL parsing only supports GitHub (SSH and HTTPS formats)
-- **Read-only for local repos**: The plugin never modifies local repositories (type: "local")
-- **No diff/blame**: Use git directly for advanced git operations
-- **Single branch per repo**: Each repo has one directory; switching branches replaces the working tree (no parallel branch access)
-
----
+```ts
+repo_find({ query: "next.js" })
+repo_find({ query: "vercel/next.js" })
+```
 
 ## Development
 
-### Running tests
-
 ```bash
 bun test
-```
-
-### Type checking
-
-```bash
 bunx tsc --noEmit
 ```
-
-### Project structure
-
-```
-opencode-repos/
-├── index.ts                  # Main plugin file with all tools
-├── src/
-│   ├── manifest.ts           # Manifest operations (load, save, lock)
-│   ├── git.ts                # Git operations (clone, update, parse)
-│   ├── scanner.ts            # Local repo scanner
-│   └── agents/
-│       └── repo-explorer.ts  # Explorer agent definition
-├── src/__tests__/            # Test files
-├── package.json
-├── tsconfig.json
-└── README.md
-```
-
----
 
 ## License
 
