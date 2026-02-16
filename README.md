@@ -11,7 +11,9 @@ This rewrite focuses on stability and predictable behavior instead of advanced o
 - Falls back across SSH/HTTPS clone URLs to reduce `git clone` exit code 128 failures
 - Handles branch fallback more safely when default branch is not `main`
 - Registers local repositories from configured search paths
+- Lists and reads remote GitHub files without cloning
 - Reads files from registered repositories with optional glob support
+- Registers a dedicated `repo-explorer` subagent for external codebase analysis
 
 ## Install
 
@@ -73,6 +75,24 @@ repo_list({ type: "cached" })
 repo_list({ type: "local" })
 ```
 
+### `repo_tree`
+
+List remote repository files directly from GitHub API (no clone).
+
+```ts
+repo_tree({ repo: "vercel/next.js" })
+repo_tree({ repo: "vercel/next.js@canary", path: "packages/next/src", limit: 300 })
+```
+
+### `repo_read_remote`
+
+Read one remote file directly from GitHub API (no clone).
+
+```ts
+repo_read_remote({ repo: "vercel/next.js", path: "README.md" })
+repo_read_remote({ repo: "vercel/next.js@canary", path: "packages/next/src/server/next.ts", maxLines: 200 })
+```
+
 ### `repo_read`
 
 Read files from a registered repository.
@@ -117,6 +137,14 @@ Search registered repos, local repos, and GitHub (if `gh` is installed and authe
 repo_find({ query: "next.js" })
 repo_find({ query: "vercel/next.js" })
 ```
+
+## Repo Explorer Agent
+
+The plugin registers a `repo-explorer` subagent automatically.
+
+- Use this when users explicitly ask for "repo explorer agent" behavior
+- For quick file discovery, prefer `repo_tree` and `repo_read_remote` first
+- Use `repo_clone` + `repo_read` when local checkout is actually required
 
 ## Development
 

@@ -22,6 +22,7 @@ import {
   type RepoEntry,
   withManifestLock,
 } from "./src/manifest"
+import { createRepoExplorerAgent } from "./src/agents/repo-explorer"
 import { findLocalRepoByName, matchRemoteToSpec, scanLocalRepos } from "./src/scanner"
 
 interface Config {
@@ -53,6 +54,33 @@ interface EnsureRepoResult {
   branch: string
   type: "cached" | "local"
   status: "cached" | "cloned" | "reused"
+}
+
+interface GitHubTreeEntry {
+  path: string
+  type: string
+  size?: number
+}
+
+interface GitHubTreeResponse {
+  tree?: GitHubTreeEntry[]
+  truncated?: boolean
+}
+
+interface GitHubContentFile {
+  type: "file"
+  path: string
+  name: string
+  size?: number
+  encoding?: string
+  content?: string
+}
+
+interface GitHubContentDirectoryEntry {
+  type: string
+  path: string
+  name: string
+  size?: number
 }
 
 const CONFIG_PATH = join(homedir(), ".config", "opencode", "opencode-repos.json")
@@ -184,6 +212,97 @@ function resolveRepoTarget(repoInput: string, defaultBranch: string): RepoTarget
     branch: spec.branch || defaultBranch,
     explicitBranch: spec.branch,
   }
+}
+
+function normalizeRepoPath(inputPath: string): string {
+  const trimmed = inputPath.trim().replace(/^\.\//, "")
+  if (!trimmed) {
+    return ""
+  }
+
+  const normalized = trimmed.replace(/^\/+/, "").replace(/\/{2,}/g, "/")
+  return normalized
+}
+
+function encodeRepoPathForApi(path: string): string {
+  const normalized = normalizeRepoPath(path)
+  return normalized
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/")
+}
+
+function matchesTreePrefix(path: string, prefix: string): boolean {
+  if (!prefix) {
+    return true
+  }
+
+  if (path === prefix) {
+    return true
+  }
+
+  const prefixWithSlash = prefix.endsWith("/") ? prefix : `${prefix}/`
+  return path.startsWith(prefixWithSlash)
+}
+
+function truncateByLines(content: string, maxLines: number): { text: string; totalLines: number; truncated: boolean } {
+  const lines = content.split("\n")
+  if (lines.length <= maxLines) {
+    return {
+      text: content,
+      totalLines: lines.length,
+      truncated: false,
+    }
+  }
+
+  return {
+    text: lines.slice(0, maxLines).join("\n"),
+    totalLines: lines.length,
+    truncated: true,
+  }
+}
+
+async function fetchRemoteTree(repoKey: string, branch: string): Promise<{ files: GitHubTreeEntry[]; truncated: boolean }> {
+  const endpoint = `repos/${repoKey}/git/trees/${encodeURIComponent(branch)}?recursive=1`
+  const response = await $`gh api ${endpoint}`.text()
+  const parsed = JSON.parse(response) as GitHubTreeResponse
+  const tree = Array.isArray(parsed.tree) ? parsed.tree : []
+  const files = tree.filter((item) => item.type === "blob" && typeof item.path === "string")
+
+  return {
+    files,
+    truncated: parsed.truncated === true,
+  }
+}
+
+async function readRemoteFile(repoKey: string, branch: string, path: string): Promise<string> {
+  const encodedPath = encodeRepoPathForApi(path)
+  if (!encodedPath) {
+    throw new Error("File path cannot be empty")
+  }
+
+  const endpoint = `repos/${repoKey}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`
+  const metadataText = await $`gh api ${endpoint}`.text()
+  const parsed = JSON.parse(metadataText) as GitHubContentFile | GitHubContentDirectoryEntry[]
+
+  if (Array.isArray(parsed)) {
+    const names = parsed
+      .slice(0, 100)
+      .map((entry) => `${entry.type === "dir" ? "[dir]" : "[file]"} ${entry.path}`)
+      .join("\n")
+    throw new Error(`Path is a directory. Choose a file:\n${names}`)
+  }
+
+  if (parsed.type !== "file") {
+    throw new Error(`Path is not a file: ${parsed.path}`)
+  }
+
+  if (parsed.encoding === "base64" && typeof parsed.content === "string") {
+    return Buffer.from(parsed.content.replace(/\n/g, ""), "base64").toString("utf8")
+  }
+
+  return await $`gh api --header ${"Accept: application/vnd.github.raw"} ${endpoint}`.text()
 }
 
 function repoRemoteMatches(remote: string | null, repoKey: string): boolean {
@@ -463,10 +582,23 @@ export const OpencodeRepos: Plugin = async ({ directory }) => {
   setCacheDir(config.cacheDir)
 
   return {
+    config: async (runtimeConfig) => {
+      runtimeConfig.agent = {
+        ...runtimeConfig.agent,
+        "repo-explorer": createRepoExplorerAgent(),
+      }
+    },
+
+    "experimental.chat.system.transform": async (_input, output) => {
+      output.system.push(
+        "When users ask to inspect or summarize a GitHub repository, prefer repo_tree and repo_read_remote for no-clone browsing. Use repo_clone only when local checkout is required. If user explicitly asks for repo explorer agent, use agent name repo-explorer."
+      )
+    },
+
     tool: {
       repo_clone: tool({
         description:
-          "Clone a GitHub repository to local cache or return the existing cached path. Handles branch and protocol fallback to reduce git clone 128 errors.",
+          "Clone a GitHub repository to local cache or return the existing cached path. Use this when local checkout is needed. Handles branch and protocol fallback to reduce git clone 128 errors.",
         args: {
           repo: tool.schema.string().describe("Repository in format 'owner/repo' or 'owner/repo@branch'"),
           force: tool.schema.boolean().optional().default(false).describe("Delete and re-clone cache entry"),
@@ -486,6 +618,87 @@ export const OpencodeRepos: Plugin = async ({ directory }) => {
             return `## ${heading}\n\n**Repository**: ${target.repoKey}\n**Branch**: ${ensured.branch}\n**Type**: ${ensured.type}\n**Path**: ${ensured.path}`
           } catch (error) {
             return `## Clone failed\n\nFailed to prepare \`${target.repoKey}\`: ${toErrorMessage(error)}`
+          }
+        },
+      }),
+
+      repo_tree: tool({
+        description:
+          "List repository files directly from GitHub API without cloning. Useful for fast exploration before checkout.",
+        args: {
+          repo: tool.schema.string().describe("Repository in format 'owner/repo' or 'owner/repo@branch'"),
+          path: tool.schema.string().optional().default("").describe("Optional path prefix filter"),
+          limit: tool.schema.number().optional().default(200).describe("Maximum file paths to return"),
+        },
+        async execute(args) {
+          const target = resolveRepoTarget(args.repo, config.defaultBranch)
+          const prefix = normalizeRepoPath(args.path ?? "")
+          const limit = Math.max(1, Math.min(args.limit ?? 200, 2000))
+
+          try {
+            const remoteTree = await fetchRemoteTree(target.repoKey, target.branch)
+            const filtered = remoteTree.files
+              .filter((entry) => matchesTreePrefix(entry.path, prefix))
+              .sort((a, b) => a.path.localeCompare(b.path))
+
+            if (filtered.length === 0) {
+              const scope = prefix ? ` under \`${prefix}\`` : ""
+              return `## Remote tree\n\nNo files found for \`${target.repoKey}\` @ \`${target.branch}\`${scope}.`
+            }
+
+            const shown = filtered.slice(0, limit)
+
+            let output = `## Remote tree for ${target.repoKey} @ ${target.branch}\n\nSource: GitHub API (no clone)\n\n`
+            for (const file of shown) {
+              const size = typeof file.size === "number" ? ` (${file.size} bytes)` : ""
+              output += `- ${file.path}${size}\n`
+            }
+
+            if (filtered.length > shown.length) {
+              output += `\nShowing ${shown.length} of ${filtered.length} matching files.`
+            }
+
+            if (remoteTree.truncated) {
+              output += "\nGitHub returned a truncated tree for this repository."
+            }
+
+            return output.trimEnd()
+          } catch (error) {
+            return `## Remote tree failed\n\nCould not list files for \`${target.repoKey}\` @ \`${target.branch}\`: ${toErrorMessage(error)}\n\nIf the repository is private or gh is unavailable, use \`repo_clone\` and then \`repo_read\`.`
+          }
+        },
+      }),
+
+      repo_read_remote: tool({
+        description:
+          "Read a file directly from GitHub API without cloning. Useful for lightweight repository inspection.",
+        args: {
+          repo: tool.schema.string().describe("Repository in format 'owner/repo' or 'owner/repo@branch'"),
+          path: tool.schema.string().describe("File path inside the repository"),
+          maxLines: tool.schema.number().optional().default(500).describe("Maximum lines to return"),
+        },
+        async execute(args) {
+          const target = resolveRepoTarget(args.repo, config.defaultBranch)
+          const filePath = normalizeRepoPath(args.path)
+          const maxLines = Math.max(1, args.maxLines ?? 500)
+
+          if (!filePath) {
+            return "## Invalid path\n\nProvide a non-empty file path."
+          }
+
+          try {
+            const content = await readRemoteFile(target.repoKey, target.branch, filePath)
+            const truncated = truncateByLines(content, maxLines)
+
+            let output = `## Remote file ${filePath}\n\nRepository: ${target.repoKey} @ ${target.branch}\nSource: GitHub API (no clone)\n\n\`\`\`\n${truncated.text}\n\`\`\``
+
+            if (truncated.truncated) {
+              output += `\n\nTruncated at ${maxLines} lines (${truncated.totalLines} total).`
+            }
+
+            return output
+          } catch (error) {
+            return `## Remote file read failed\n\nCould not read \`${filePath}\` from \`${target.repoKey}\` @ \`${target.branch}\`: ${toErrorMessage(error)}\n\nIf needed, clone first with \`repo_clone\` and then use \`repo_read\`.`
           }
         },
       }),
