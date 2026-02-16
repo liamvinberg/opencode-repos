@@ -15,6 +15,7 @@ This rewrite focuses on stability and predictable behavior instead of advanced o
 - Auto-detects the repository default branch for remote no-clone browsing
 - Reads files from registered repositories with optional glob support
 - Registers a dedicated `repo-explorer` subagent for external codebase analysis
+- Provides a `repo_explore` tool that launches the `repo-explorer` subagent directly
 
 ## Install
 
@@ -98,6 +99,14 @@ repo_read_remote({ repo: "vercel/next.js@canary", path: "packages/next/src/serve
 
 If no branch is specified, the tool resolves the repository default branch automatically.
 
+### `repo_explore`
+
+Run the dedicated `repo-explorer` subagent against a repository and return a focused architecture summary.
+
+```ts
+repo_explore({ repo: "anomalyco/opencode", question: "How do subagents and task delegation work?" })
+```
+
 ### `repo_read`
 
 Read files from a registered repository.
@@ -150,6 +159,7 @@ The plugin registers a `repo-explorer` subagent automatically.
 - Use this when users explicitly ask for "repo explorer agent" behavior
 - For quick file discovery, prefer `repo_tree` and `repo_read_remote` first
 - Use `repo_clone` + `repo_read` when local checkout is actually required
+- Use `repo_explore` when you want guaranteed `repo-explorer` subagent execution
 
 ## Development
 

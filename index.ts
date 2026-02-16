@@ -83,6 +83,44 @@ interface GitHubContentDirectoryEntry {
   size?: number
 }
 
+interface RepoToolContext {
+  sessionID: string
+  messageID: string
+  ask(input: {
+    permission: string
+    patterns: string[]
+    always: string[]
+    metadata: Record<string, unknown>
+  }): Promise<void>
+}
+
+interface RepoClientMessage {
+  parts?: Array<{
+    type?: string
+    text?: string
+    [key: string]: unknown
+  }>
+}
+
+interface RepoClient {
+  session: {
+    create(input: {
+      body: { parentID?: string; title?: string }
+      query?: { directory?: string }
+    }): Promise<{ data?: { id?: string } }>
+    prompt(input: {
+      path: { id: string }
+      body: {
+        agent: string
+        parts: Array<{ type: "text"; text: string }>
+        tools?: Record<string, boolean>
+      }
+    }): Promise<unknown>
+    status(): Promise<{ data?: Record<string, { type?: string }> }>
+    messages(input: { path: { id: string } }): Promise<{ data?: RepoClientMessage[] }>
+  }
+}
+
 const CONFIG_PATH = join(homedir(), ".config", "opencode", "opencode-repos.json")
 
 const DEFAULT_CONFIG: ResolvedConfig = {
@@ -283,6 +321,106 @@ async function getGitHubDefaultBranch(repoKey: string): Promise<string | null> {
   } catch {
     return null
   }
+}
+
+async function requestExternalDirectoryAccess(ctx: RepoToolContext, targetPath: string): Promise<void> {
+  const parent = dirname(targetPath)
+  const pattern = `${parent}/*`
+  await ctx.ask({
+    permission: "external_directory",
+    patterns: [pattern],
+    always: [pattern],
+    metadata: {
+      filepath: targetPath,
+      parentDir: parent,
+    },
+  })
+}
+
+function extractTextFromMessages(messages: RepoClientMessage[]): string {
+  const textParts: string[] = []
+
+  for (const message of messages) {
+    for (const part of message.parts ?? []) {
+      if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
+        textParts.push(part.text)
+      }
+    }
+  }
+
+  return textParts.join("\n\n").trim()
+}
+
+async function runRepoExplorer(
+  client: RepoClient,
+  ctx: RepoToolContext,
+  repoKey: string,
+  repoPath: string,
+  question: string
+): Promise<string> {
+  await requestExternalDirectoryAccess(ctx, repoPath)
+
+  const created = await client.session.create({
+    body: {
+      parentID: ctx.sessionID,
+      title: `Repo explorer: ${repoKey}`,
+    },
+    query: {
+      directory: repoPath,
+    },
+  })
+
+  const taskSessionID = created.data?.id
+  if (!taskSessionID) {
+    throw new Error("Failed to create subagent session")
+  }
+
+  const prompt = [
+    "Explore this repository and answer the question.",
+    `Repository: ${repoKey}`,
+    `Path: ${repoPath}`,
+    "",
+    `Question: ${question}`,
+    "",
+    "Expectations:",
+    "- Focus on architecture and key agent-related flows.",
+    "- Cite specific file paths.",
+    "- Keep findings concise and actionable.",
+  ].join("\n")
+
+  await client.session.prompt({
+    path: { id: taskSessionID },
+    body: {
+      agent: "repo-explorer",
+      tools: {
+        task: false,
+        delegate_task: false,
+      },
+      parts: [{ type: "text", text: prompt }],
+    },
+  })
+
+  const started = Date.now()
+  const timeoutMs = 180_000
+  const intervalMs = 750
+
+  while (Date.now() - started < timeoutMs) {
+    await Bun.sleep(intervalMs)
+
+    const status = await client.session.status()
+    const current = status.data?.[taskSessionID]
+    if (current && current.type && current.type !== "idle") {
+      continue
+    }
+
+    const messages = await client.session.messages({ path: { id: taskSessionID } })
+    const text = extractTextFromMessages(messages.data ?? [])
+    if (text) {
+      return `## Repo Explorer Result\n\nRepository: ${repoKey}\nPath: ${repoPath}\n\n${text}`
+    }
+  }
+
+  throw new Error("Timed out waiting for repo-explorer response")
 }
 
 async function readRemoteFile(repoKey: string, branch: string, path: string): Promise<string> {
@@ -584,7 +722,7 @@ function formatFindResults(
   return output.trimEnd()
 }
 
-export const OpencodeRepos: Plugin = async ({ directory }) => {
+export const OpencodeRepos: Plugin = async ({ directory, client }) => {
   const userConfig = await loadConfig()
   const config = resolveConfig(userConfig, directory)
 
@@ -600,7 +738,7 @@ export const OpencodeRepos: Plugin = async ({ directory }) => {
 
     "experimental.chat.system.transform": async (_input, output) => {
       output.system.push(
-        "When users ask to inspect or summarize a GitHub repository, prefer repo_tree and repo_read_remote for no-clone browsing. Use repo_clone only when local checkout is required. If user explicitly asks for repo explorer agent, use agent name repo-explorer."
+        "When users ask to inspect or summarize a GitHub repository, prefer repo_tree and repo_read_remote for no-clone browsing. Use repo_clone only when local checkout is required. If user explicitly asks for repo explorer agent, call repo_explore (it launches subagent repo-explorer) or use task with subagent_type=repo-explorer."
       )
     },
 
@@ -722,6 +860,32 @@ export const OpencodeRepos: Plugin = async ({ directory }) => {
             return output
           } catch (error) {
             return `## Remote file read failed\n\nCould not read \`${filePath}\` from \`${target.repoKey}\` @ \`${target.branch}\`: ${toErrorMessage(error)}\n\nIf needed, clone first with \`repo_clone\` and then use \`repo_read\`.`
+          }
+        },
+      }),
+
+      repo_explore: tool({
+        description:
+          "Launch the dedicated repo-explorer subagent for architecture-focused exploration of a repository.",
+        args: {
+          repo: tool.schema.string().describe("Repository in format 'owner/repo' or 'owner/repo@branch'"),
+          question: tool.schema.string().describe("Question for the repo-explorer subagent"),
+        },
+        async execute(args, context) {
+          const target = resolveRepoTarget(args.repo, config.defaultBranch)
+
+          try {
+            const ensured = await ensureCachedRepo(config, target, false)
+            const result = await runRepoExplorer(
+              client as unknown as RepoClient,
+              context as unknown as RepoToolContext,
+              target.repoKey,
+              ensured.path,
+              args.question
+            )
+            return result
+          } catch (error) {
+            return `## Repo explore failed\n\nCould not run repo-explorer for \`${target.repoKey}\`: ${toErrorMessage(error)}`
           }
         },
       }),
